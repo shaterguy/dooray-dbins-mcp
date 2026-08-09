@@ -17,7 +17,10 @@ function applySecurityHeaders(res) {
 export function applyCorsHeaders(req, res) {
   const origin = req.headers?.origin;
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE");
-  res.setHeader("Access-Control-Allow-Headers", "content-type, mcp-session-id, mcp-protocol-version, last-event-id");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "content-type, authorization, x-mcp-access-key, mcp-session-id, mcp-protocol-version, mcp-method, mcp-name, last-event-id",
+  );
   res.setHeader("Access-Control-Expose-Headers", "Mcp-Session-Id");
   if (!origin) return true;
   const allowedOrigins = new Set([

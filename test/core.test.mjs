@@ -576,6 +576,39 @@ test("valid OPTIONS is compatible with ChatGPT MCP preflight", async () => {
   }
 });
 
+test("MCP preflight allows authentication and MCP identification headers only for trusted origins", async () => {
+  useEnv();
+  const { server, baseUrl } = await startMcp();
+  try {
+    const allowed = await fetch(`${baseUrl}/${TOKEN}/mcp`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://chatgpt.com",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "Authorization, X-MCP-Access-Key, Mcp-Protocol-Version, Mcp-Method, Mcp-Name",
+      },
+    });
+    assert.equal(allowed.status, 204);
+    const allowedHeaders = allowed.headers.get("access-control-allow-headers").toLowerCase().split(",").map((value) => value.trim());
+    for (const header of ["authorization", "x-mcp-access-key", "mcp-protocol-version", "mcp-method", "mcp-name"]) {
+      assert.equal(allowedHeaders.includes(header), true, header);
+    }
+
+    const rejected = await fetch(`${baseUrl}/${TOKEN}/mcp`, {
+      method: "OPTIONS",
+      headers: {
+        origin: "https://attacker.invalid",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "Authorization, X-MCP-Access-Key, Mcp-Protocol-Version, Mcp-Method, Mcp-Name",
+      },
+    });
+    assert.equal(rejected.status, 403);
+    assert.equal(rejected.headers.get("access-control-allow-origin"), null);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test("stateless Streamable HTTP negotiates initialize, notification, and all eighteen annotated tools", async () => {
   useEnv();
   const { server, baseUrl } = await startMcp();
