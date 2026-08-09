@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": "src/dooray",
+    "rootDir": "src/dooray-ts",
+    "declaration": false,
+    "sourceMap": false,
+    "noCheck": true,
+    "allowJs": false,
+    "skipLibCheck": true,
+    "types": ["node"]
+  },
+  "include": ["src/dooray-ts/**/*.mts"]
+}

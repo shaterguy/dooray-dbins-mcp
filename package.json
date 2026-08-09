@@ -1,0 +1,26 @@
+{
+  "name": "dooray-dbins-mcp",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "description": "Read-only Dooray REST, CalDAV, and LDAP MCP server for Vercel",
+  "engines": {
+    "node": "24.x"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test",
+    "check": "npm run build && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "fast-xml-parser": "5.10.1",
+    "ldapts": "9.0.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.0",
+    "typescript": "5.8.3"
+  }
+}
+

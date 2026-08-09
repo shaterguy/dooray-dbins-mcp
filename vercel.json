@@ -1,0 +1,36 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "routes": [
+    {
+      "src": "/(.*)",
+      "headers": {
+        "X-Content-Type-Options": "nosniff",
+        "Referrer-Policy": "no-referrer"
+      },
+      "continue": true
+    },
+    {
+      "src": "^/api/mcp$",
+      "status": 404
+    },
+    {
+      "src": "^/(?<path_token>[A-Za-z0-9_-]{64})/mcp$",
+      "dest": "/api/mcp?__mcp_path_token=$path_token"
+    },
+    {
+      "src": "^/api/health$",
+      "dest": "/api/health"
+    },
+    {
+      "src": "^/$",
+      "dest": "/index.html"
+    }
+  ],
+  "functions": {
+    "api/mcp.mjs": {
+      "maxDuration": 60
+    }
+  }
+}
+
