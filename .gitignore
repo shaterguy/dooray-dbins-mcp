@@ -1,0 +1,9 @@
+node_modules/
+.vercel/
+.env
+.env.*
+!.env.example
+npm-debug.log*
+.test-dist/
+src/dooray/*.mjs
+*.tsbuildinfo
