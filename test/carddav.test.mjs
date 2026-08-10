@@ -139,6 +139,16 @@ test("DAV request enforces HTTPS same-origin and sends only the read method requ
   assert.equal(calls[0].options.method, "PROPFIND");
   assert.equal(calls[0].options.redirect, "error");
   assert.match(calls[0].options.headers.Authorization, /^Basic /);
+  await assert.rejects(
+    () => requestDav({
+      baseUrl: CARDDAV_ORIGINS.personal,
+      username: "shared-user",
+      password: "shared-password",
+      errorPrefix: "CARDDAV",
+      serviceName: "CardDAV",
+    }, "/.well-known/carddav", { method: "PUT" }),
+    { code: "CARDDAV_METHOD_NOT_ALLOWED" },
+  );
   assert.throws(
     () => toSameOriginUrl("https://attacker.invalid/carddav", CARDDAV_ORIGINS.personal),
     { code: "INVALID_DAV_PATH" },
