@@ -3,6 +3,8 @@ import { AppError } from "./errors.mjs";
 
 export const XML_BODY_LIMIT = 5 * 1024 * 1024;
 const CARDDAV_BUFFERED_BODY_LIMIT = 512 * 1024;
+export const READ_ONLY_DAV_METHODS = Object.freeze(["OPTIONS", "PROPFIND", "REPORT", "GET"]);
+const READ_ONLY_DAV_METHOD_SET = new Set(READ_ONLY_DAV_METHODS);
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -165,6 +167,13 @@ export async function requestDav({
   allowSameOriginRedirects = false,
   contentType = "application/xml; charset=utf-8",
 }, href, { method, body, depth, accept = "application/xml, text/calendar;q=0.9" }) {
+  const normalizedMethod = String(method || "").toUpperCase();
+  if (!READ_ONLY_DAV_METHOD_SET.has(normalizedMethod)) {
+    throw new AppError(
+      `${errorPrefix}_METHOD_NOT_ALLOWED`,
+      `The ${serviceName.toLowerCase()} client permits read-only methods only.`,
+    );
+  }
   let url = toSameOriginUrl(
     href,
     baseUrl,
@@ -175,7 +184,7 @@ export async function requestDav({
   const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
     const request = () => fetch(url, {
-        method,
+        method: normalizedMethod,
         headers: {
           Authorization: basicAuthorization(username, password),
           Accept: accept,
