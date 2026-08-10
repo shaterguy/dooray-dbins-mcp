@@ -31,29 +31,29 @@ function xml(value) {
 
 function discoveryResponse(path) {
   if (path === "/.well-known/carddav") {
-    return \`<?xml version="1.0"?>
+    return `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
-  <d:response><d:href>\${path}</d:href><d:propstat><d:prop>
+  <d:response><d:href>${path}</d:href><d:propstat><d:prop>
     <d:current-user-principal><d:href>/principals/shared/</d:href></d:current-user-principal>
   </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
-</d:multistatus>\`;
+</d:multistatus>`;
   }
   if (path === "/principals/shared/") {
-    return \`<?xml version="1.0"?>
+    return `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
-  <d:response><d:href>\${path}</d:href><d:propstat><d:prop>
+  <d:response><d:href>${path}</d:href><d:propstat><d:prop>
     <c:addressbook-home-set><d:href>/addressbooks/shared/</d:href></c:addressbook-home-set>
   </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
-</d:multistatus>\`;
+</d:multistatus>`;
   }
-  return \`<?xml version="1.0"?>
+  return `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
   <d:response><d:href>/addressbooks/shared/</d:href><d:propstat><d:prop>
     <d:displayname>Shared contacts</d:displayname>
     <d:resourcetype><d:collection/><c:addressbook/></d:resourcetype>
     <c:supported-address-data><c:address-data content-type="text/vcard" version="3.0"/></c:supported-address-data>
   </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
-</d:multistatus>\`;
+</d:multistatus>`;
 }
 
 const vcard = [
@@ -72,13 +72,13 @@ const vcard = [
 ].join("\r\n");
 
 function contactResponse({ href = "/addressbooks/shared/person-1.vcf", includeData = true } = {}) {
-  const data = includeData ? \`<d:address-data>\${xml(vcard)}</d:address-data>\` : "";
-  return \`<?xml version="1.0"?>
+  const data = includeData ? `<d:address-data>${xml(vcard)}</d:address-data>` : "";
+  return `<?xml version="1.0"?>
 <d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
-  <d:response><d:href>\${href}</d:href><d:propstat><d:prop>
-    <d:getetag>"v1"</d:getetag>\${data}
+  <d:response><d:href>${href}</d:href><d:propstat><d:prop>
+    <d:getetag>"v1"</d:getetag>${data}
   </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
-</d:multistatus>\`;
+</d:multistatus>`;
 }
 
 function installFetch({ organizationUnauthorized = false } = {}) {
