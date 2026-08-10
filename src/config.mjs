@@ -16,6 +16,10 @@ export const FIXED_CONFIG = Object.freeze({
   maxCalendarResults: 100,
   maxDirectoryResults: 50,
   maxCalendarRangeDays: 366,
+  maxCardDavAddressBooks: 20,
+  maxCardDavContacts: 50,
+  maxCardDavResources: 100,
+  maxCardDavVCardBytes: 512 * 1024,
 });
 
 export const SECRET_ENV_KEYS = Object.freeze([

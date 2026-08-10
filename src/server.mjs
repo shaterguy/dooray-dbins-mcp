@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { checkCalDav, getEvents, listCalendars, searchEvents } from "./caldav.mjs";
+import { checkCardDav, getContact, listAddressBooks, searchContacts } from "./carddav.mjs";
 import { checkLdap, getGroupMembers, getPerson, searchPeople } from "./ldap.mjs";
 import { toSafeError, toolFailure, toolSuccess } from "./errors.mjs";
 import { registerDoorayTools } from "./dooray/register-tools.mjs";
@@ -49,14 +50,30 @@ export function createMcpServer(config) {
   }, async ({ testConnections }) => {
     const data = {
       ready: true,
-      fixedServices: { calendar: "caldav.dooray.co.kr", directory: "ldap.dooray.co.kr:636" },
+      fixedServices: {
+        calendar: "caldav.dooray.co.kr",
+        directory: "ldap.dooray.co.kr:636",
+        contacts: {
+          personal: "carddav.dooray.co.kr",
+          organization: "carddav-members.dooray.co.kr",
+        },
+      },
       connectionsTested: testConnections,
     };
     if (testConnections) {
-      const [calendar, directory] = await Promise.allSettled([checkCalDav(config), checkLdap(config)]);
+      const [calendar, directory, personalContacts, organizationContacts] = await Promise.allSettled([
+        checkCalDav(config),
+        checkLdap(config),
+        checkCardDav(config, "personal"),
+        checkCardDav(config, "organization"),
+      ]);
       data.connections = {
         calendar: safeConnectionStatus(calendar),
         directory: safeConnectionStatus(directory),
+        contacts: {
+          personal: safeConnectionStatus(personalContacts),
+          organization: safeConnectionStatus(organizationContacts),
+        },
       };
     }
     return toolSuccess(data, `Service ready; connections tested: ${testConnections}.`);
@@ -86,6 +103,33 @@ export function createMcpServer(config) {
   }, async (args) => {
     const data = await searchEvents(config, args);
     return toolSuccess(data, `Found ${data.events.length} matching event(s).`);
+  });
+
+  register(server, "carddav_list_address_books", "List readable CardDAV address books from the fixed personal and organization sources.", {
+    source: z.enum(["personal", "organization", "all"]).default("all"),
+  }, async ({ source }) => {
+    const data = await listAddressBooks(config, { source });
+    return toolSuccess(data, "CardDAV address book discovery completed.");
+  });
+
+  register(server, "carddav_search_contacts", "Search bounded contact fields in the fixed personal or organization CardDAV source.", {
+    source: z.enum(["personal", "organization", "all"]).default("all"),
+    query: z.string().trim().min(1).max(200),
+    addressBookHref: z.string().trim().min(1).max(2048).optional().describe("Address book href returned by carddav_list_address_books"),
+    limit: z.number().int().min(1).max(50).default(20),
+  }, async (args) => {
+    const data = await searchContacts(config, args);
+    return toolSuccess(data, `Found ${data.contacts.length} matching CardDAV contact(s).`);
+  });
+
+  register(server, "carddav_get_contact", "Read one bounded contact from a fixed CardDAV source by a discovered href or UID.", {
+    source: z.enum(["personal", "organization"]),
+    uid: z.string().trim().min(1).max(320).optional(),
+    href: z.string().trim().min(1).max(2048).optional().describe("Contact href returned by carddav_search_contacts"),
+    addressBookHref: z.string().trim().min(1).max(2048).optional().describe("Address book href returned by carddav_list_address_books"),
+  }, async (args) => {
+    const data = await getContact(config, args);
+    return toolSuccess({ contact: data }, "Found one CardDAV contact.");
   });
 
   register(server, "directory_search_people", "Search the fixed Dooray LDAP directory using a bounded attribute allowlist.", {

@@ -1,13 +1,16 @@
 # dooray-dbins-mcp
 
-Vercel에 배포하는 Dooray REST·CalDAV·LDAP 조회 전용 MCP 서버입니다. 하나의 stateless Streamable HTTP endpoint에서 원본 두 MCP의 도구 18개를 제공합니다.
+Vercel에 배포하는 Dooray REST·CalDAV·LDAP·CardDAV 조회 전용 MCP 서버입니다. 하나의 stateless Streamable HTTP endpoint에서 기존 18개 도구와 CardDAV 연락처 도구 3개를 제공합니다.
 
 ## 제공 도구
 
 - Dooray REST 11개: `dooray_check_connection`, `dooray_whoami`, `dooray_common`, `dooray_projects`, `dooray_tasks`, `dooray_messenger`, `dooray_calendar`, `dooray_wiki`, `dooray_drive`, `dooray_api_get`, `dooray_capabilities`
 - CalDAV·LDAP 7개: `service_status`, `calendar_list_calendars`, `calendar_get_events`, `calendar_search_events`, `directory_search_people`, `directory_get_person`, `directory_get_group_members`
+- CardDAV 3개: `carddav_list_address_books`, `carddav_search_contacts`, `carddav_get_contact`
 
-모든 도구에는 read-only annotation이 적용됩니다. Dooray REST는 GET만 사용하고, CalDAV는 조회용 PROPFIND·REPORT, LDAP는 bind·search·unbind만 사용합니다.
+CardDAV source는 `personal`(carddav.dooray.co.kr)과 `organization`(carddav-members.dooray.co.kr)으로 고정됩니다. 인증은 기존 `DOORAY_USERNAME` / `DOORAY_PASSWORD`를 CalDAV·LDAP와 함께 재사용하며 CardDAV 전용 자격증명 환경변수는 없습니다.
+
+모든 도구에는 read-only annotation이 적용됩니다. Dooray REST는 GET만 사용하고, CalDAV·CardDAV는 조회용 OPTIONS·PROPFIND·REPORT·GET만 사용하며, LDAP는 bind·search·unbind만 사용합니다. CardDAV 응답은 제한된 연락처 필드만 반환하고 전체 vCard, PHOTO, SOUND, KEY는 반환하지 않습니다.
 
 ## MCP 엔드포인트
 
@@ -22,8 +25,8 @@ https://<your-vercel-project>.vercel.app/<64-character-path-token>/mcp
 | 이름 | 필수 | 설명 |
 |---|---:|---|
 | `MCP_PATH_TOKEN` | 예 | 정확히 64자의 URL-safe 경로 보호 secret |
-| `DOORAY_USERNAME` | 예 | CalDAV Basic auth와 LDAP bind에 공통 사용 |
-| `DOORAY_PASSWORD` | 예 | CalDAV Basic auth와 LDAP bind에 공통 사용 |
+| `DOORAY_USERNAME` | 예 | CalDAV·CardDAV Basic auth와 LDAP bind에 공통 사용 |
+| `DOORAY_PASSWORD` | 예 | CalDAV·CardDAV Basic auth와 LDAP bind에 공통 사용 |
 | `DOORAY_API_TOKEN` | 예 | Dooray REST 개인 API token |
 | `MCP_ACCESS_KEY` | 아니오 | Bearer 또는 사용자 정의 헤더 호환 access key |
 | `MCP_ALLOWED_ORIGINS` | 아니오 | 추가 허용 Origin, 쉼표 구분 |
@@ -48,4 +51,3 @@ npm run check
 2. Framework Preset은 Other 또는 자동 감지를 사용하고 Build Command는 `npm run build`으로 둡니다.
 3. Production 환경변수를 등록합니다.
 4. 배포 후 `/<64-character-path-token>/mcp`에서 MCP initialize와 tools/list를 확인합니다.
-

@@ -609,7 +609,7 @@ test("MCP preflight allows authentication and MCP identification headers only fo
   }
 });
 
-test("stateless Streamable HTTP negotiates initialize, notification, and all eighteen annotated tools", async () => {
+test("stateless Streamable HTTP negotiates initialize, notification, and all twenty-one annotated tools", async () => {
   useEnv();
   const { server, baseUrl } = await startMcp();
   const endpoint = `${baseUrl}/${TOKEN}/mcp`;
@@ -641,6 +641,9 @@ test("stateless Streamable HTTP negotiates initialize, notification, and all eig
       "calendar_list_calendars",
       "calendar_get_events",
       "calendar_search_events",
+      "carddav_list_address_books",
+      "carddav_search_contacts",
+      "carddav_get_contact",
       "directory_search_people",
       "directory_get_person",
       "directory_get_group_members",

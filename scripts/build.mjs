@@ -23,7 +23,7 @@ if (!vercel.routes?.some((route) => route.src === "^/$" && route.dest === "/inde
 
 const publicIndex = await readFile(new URL("public/index.html", root), "utf8");
 if (!publicIndex.includes('content="noindex, nofollow, noarchive"')) throw new Error("Public status page must be noindex");
-for (const forbidden of ["MCP_PATH_TOKEN", "MCP_ACCESS_TOKEN", "/mcp", "caldav.dooray.co.kr", "ldap.dooray.co.kr"]) {
+for (const forbidden of ["MCP_PATH_TOKEN", "MCP_ACCESS_TOKEN", "/mcp", "caldav.dooray.co.kr", "ldap.dooray.co.kr", "carddav.dooray.co.kr", "carddav-members.dooray.co.kr"]) {
   if (publicIndex.includes(forbidden)) throw new Error(`Public status page contains forbidden service detail: ${forbidden}`);
 }
 
