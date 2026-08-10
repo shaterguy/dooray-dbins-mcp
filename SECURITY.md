@@ -8,8 +8,10 @@
 
 ## Read-only boundaries
 
+- CardDAV source and address-book hrefs are fixed/validated; arbitrary upstream URLs are not accepted.
 - Dooray REST requests are restricted to HTTPS, an allowlisted host, safe `/<service>/v<number>/...` paths, GET, no redirects, bounded responses, and non-binary responses.
 - CalDAV uses only discovery/read PROPFIND and REPORT requests.
+- CardDAV is fixed to the personal and organization Dooray HTTPS origins, reuses the shared Dooray credentials, and uses only OPTIONS, PROPFIND, REPORT, and bounded GET reads. Redirects and hrefs outside the selected origin are rejected; raw vCards and sensitive properties are not returned.
 - LDAP uses bind, bounded search, and unbind; filters and group member DNs are constrained.
 
 ## MCP ingress
