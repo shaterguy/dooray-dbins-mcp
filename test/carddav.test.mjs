@@ -141,11 +141,11 @@ test("DAV request enforces HTTPS same-origin and sends only the read method requ
   assert.match(calls[0].options.headers.Authorization, /^Basic /);
   assert.throws(
     () => toSameOriginUrl("https://attacker.invalid/carddav", CARDDAV_ORIGINS.personal),
-    { code: "CARDDAV_INVALID_PATH" },
+    { code: "INVALID_DAV_PATH" },
   );
   assert.throws(
     () => toSameOriginUrl("http://carddav.dooray.co.kr/carddav", CARDDAV_ORIGINS.personal),
-    { code: "CARDDAV_INVALID_PATH" },
+    { code: "INVALID_DAV_PATH" },
   );
   globalThis.fetch = originalFetch;
 });
@@ -190,6 +190,6 @@ test("contact lookup validates discovered href and returns bounded projection", 
   assert.equal("note" in contact, false);
   assert.throws(
     () => toSameOriginUrl("https://carddav-members.dooray.co.kr/addressbooks/shared/person-1.vcf", CARDDAV_ORIGINS.personal),
-    { code: "CARDDAV_INVALID_PATH" },
+    { code: "INVALID_DAV_PATH" },
   );
 });
