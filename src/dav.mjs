@@ -165,6 +165,7 @@ export async function requestDav({
   errorPrefix = "DAV",
   serviceName = "DAV",
   allowSameOriginRedirects = false,
+  allowLargeCardDavResponse = false,
   contentType = "application/xml; charset=utf-8",
 }, href, { method, body, depth, accept = "application/xml, text/calendar;q=0.9" }) {
   const normalizedMethod = String(method || "").toUpperCase();
@@ -220,7 +221,9 @@ export async function requestDav({
     }
     if (!response.ok && response.status !== 207) throw requestError(errorPrefix, response.status, response);
     const effectiveResponseLimit = errorPrefix === "CARDDAV"
-      ? Math.min(Number(responseLimit) || CARDDAV_BUFFERED_BODY_LIMIT, CARDDAV_BUFFERED_BODY_LIMIT)
+      ? (allowLargeCardDavResponse
+          ? Math.min(Number(responseLimit) || XML_BODY_LIMIT, XML_BODY_LIMIT)
+          : Math.min(Number(responseLimit) || CARDDAV_BUFFERED_BODY_LIMIT, CARDDAV_BUFFERED_BODY_LIMIT))
       : responseLimit;
     const text = await readResponseTextBounded(
       response,

@@ -10,7 +10,7 @@ Vercel에 배포하는 Dooray REST·CalDAV·LDAP·CardDAV 조회 전용 MCP 서�
 
 CardDAV source는 `personal`(carddav.dooray.co.kr)과 `organization`(carddav-members.dooray.co.kr)으로 고정됩니다. 인증은 기존 `DOORAY_USERNAME` / `DOORAY_PASSWORD`를 CalDAV·LDAP와 함께 재사용하며 CardDAV 전용 자격증명 환경변수는 없습니다.
 
-모든 도구에는 read-only annotation이 적용됩니다. Dooray REST는 GET만 사용하고, CalDAV·CardDAV는 조회용 OPTIONS·PROPFIND·REPORT·GET만 사용하며, LDAP는 bind·search·unbind만 사용합니다. CardDAV 응답은 제한된 연락처 필드만 반환하고 전체 vCard, PHOTO, SOUND, KEY는 반환하지 않습니다.
+모든 도구에는 read-only annotation이 적용됩니다. Dooray REST는 GET만 사용하고, CalDAV·CardDAV는 조회용 OPTIONS·PROPFIND·REPORT·GET만 사용하며, LDAP는 bind·search·unbind만 사용합니다. CardDAV 응답은 제한된 연락처 필드만 반환하고 전체 vCard, PHOTO, SOUND, KEY는 반환하지 않습니다. 조직 CardDAV가 표준 REPORT 검색을 거부하는 경우에는 주소록 리소스 목록을 읽은 뒤 최대 100개 리소스만 동시 4개씩 GET하여 로컬 필터링하며, 개별 vCard의 기존 512 KiB 상한과 반환 필드 제한은 유지합니다.
 
 ## MCP 엔드포인트
 

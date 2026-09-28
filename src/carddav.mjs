@@ -1,5 +1,6 @@
 import { AppError, toSafeError } from "./errors.mjs";
 import {
+  XML_BODY_LIMIT,
   asArray,
   multistatusResponses,
   parseDavXml,
@@ -23,6 +24,7 @@ const DISCOVERY_PATHS = Object.freeze([
   { label: "legacy_carddav", path: "/carddav/" },
 ]);
 const MULTIGET_BATCH_SIZE = 10;
+const GET_FALLBACK_CONCURRENCY = 4;
 const ADDRESS_DATA_PROPS = "<d:getetag /><c:address-data content-type=\"text/vcard\" version=\"4.0\"><c:prop name=\"UID\" /><c:prop name=\"FN\" /><c:prop name=\"N\" /><c:prop name=\"EMAIL\" /><c:prop name=\"TEL\" /><c:prop name=\"ORG\" /><c:prop name=\"TITLE\" /></c:address-data>";
 const METADATA_ONLY_PROPS = "<d:getetag />";
 const FIRST_CONTACT_DATA_PROPS = "<c:address-data content-type=\"text/vcard\" version=\"4.0\"><c:prop name=\"UID\" /><c:prop name=\"FN\" /></c:address-data>";
@@ -78,10 +80,11 @@ async function davRequest(credentials, href, options, requestOptions = {}) {
     username: credentials.username,
     password: credentials.password,
     requestTimeoutMs: credentials.requestTimeoutMs,
-    responseLimit: credentials.responseLimit,
+    responseLimit: requestOptions.responseLimit ?? credentials.responseLimit,
     errorPrefix: "CARDDAV",
     serviceName: "CardDAV",
     allowSameOriginRedirects: requestOptions.allowSameOriginRedirects === true,
+    allowLargeCardDavResponse: requestOptions.allowLargeCardDavResponse === true,
     contentType: requestOptions.contentType,
   }, href, options);
 }
@@ -392,6 +395,98 @@ async function addressBookMultiget(credentials, addressBookHref, hrefs) {
   return parseCardDavXml(result.text);
 }
 
+async function contactResourceHrefs(result, addressBookHref, config) {
+  const document = await propfind(
+    result.credentials,
+    addressBookHref,
+    1,
+    "<d:getetag />",
+    { responseLimit: XML_BODY_LIMIT, allowLargeCardDavResponse: true },
+  );
+  const bookUrl = toSameOriginUrl(
+    addressBookHref,
+    result.credentials.baseUrl,
+    "CARDDAV_INVALID_PATH",
+    "Use an address book href returned by CardDAV discovery.",
+  );
+  const bookPath = bookUrl.pathname.endsWith("/") ? bookUrl.pathname : `${bookUrl.pathname}/`;
+  const hrefs = [];
+  for (const response of multistatusResponses(document)) {
+    const href = hrefFromResponse(response, result.credentials);
+    if (!href || href === bookUrl.pathname || !href.startsWith(bookPath)) continue;
+    if (!href.toLowerCase().endsWith(".vcf")) continue;
+    hrefs.push(href);
+  }
+  const unique = [...new Set(hrefs)];
+  return {
+    hrefs: unique.slice(0, config.maxCardDavResources),
+    totalResources: unique.length,
+  };
+}
+
+async function readContactResource(result, addressBookHref, href, config) {
+  try {
+    const response = await davRequest(result.credentials, href, {
+      method: "GET",
+      accept: "text/vcard, text/x-vcard;q=0.9",
+    });
+    const contact = parseVCard(response.text, { maxBytes: config.maxCardDavVCardBytes });
+    return {
+      contact,
+      projected: projectContact(contact, { source: result.source, addressBookHref, href }),
+      invalid: 0,
+    };
+  } catch (error) {
+    if (error instanceof AppError && [
+      "CARDDAV_RESPONSE_TOO_LARGE",
+      "CARDDAV_NOT_FOUND",
+      "CARDDAV_INVALID_VCARD",
+    ].includes(error.code)) {
+      return { contact: null, projected: null, invalid: error.code === "CARDDAV_NOT_FOUND" ? 0 : 1 };
+    }
+    throw error;
+  }
+}
+
+async function scanContactsByGetFallback(
+  result,
+  addressBookHref,
+  config,
+  { query = "", uid = "", limit = config.maxCardDavContacts } = {},
+) {
+  const resources = await contactResourceHrefs(result, addressBookHref, config);
+  const contacts = [];
+  let invalid = 0;
+  let scannedResources = 0;
+  const normalizedQuery = String(query || "").toLocaleLowerCase("ko-KR");
+  const normalizedUid = String(uid || "");
+  for (
+    let offset = 0;
+    offset < resources.hrefs.length && contacts.length < limit;
+    offset += GET_FALLBACK_CONCURRENCY
+  ) {
+    const batch = resources.hrefs.slice(offset, offset + GET_FALLBACK_CONCURRENCY);
+    const loaded = await Promise.all(
+      batch.map((href) => readContactResource(result, addressBookHref, href, config)),
+    );
+    scannedResources += batch.length;
+    for (const item of loaded) {
+      invalid += item.invalid;
+      if (!item.contact || !item.projected) continue;
+      if (normalizedUid && item.contact.uid !== normalizedUid) continue;
+      if (normalizedQuery && !contactSearchText(item.contact).includes(normalizedQuery)) continue;
+      contacts.push(item.projected);
+      if (contacts.length >= limit) break;
+    }
+  }
+  return {
+    contacts,
+    invalid,
+    scannedResources,
+    resourceTruncated: resources.totalResources > resources.hrefs.length,
+  };
+}
+
 function parseContacts(document, result, addressBookHref, config, query = "") {
   const contacts = [];
   const candidates = [];
@@ -512,30 +607,55 @@ async function compatibilityMetadataQuery(result, addressBookHref, query, proper
   }
 }
 
-async function contactsForBook(result, addressBookHref, query, config, propertyNames, diagnostics) {
+async function contactsForBook(
+  result,
+  addressBookHref,
+  query,
+  config,
+  propertyNames,
+  diagnostics,
+  limit = config.maxCardDavContacts,
+) {
   let invalid = 0;
   let document;
   try {
     document = await addressBookQuery(result.credentials, addressBookHref, query, propertyNames);
   } catch (error) {
     if (!isQueryCompatibilityFailure(error)) throw error;
-    document = await compatibilityMetadataQuery(
-      result,
-      addressBookHref,
-      query,
-      propertyNames,
-      diagnostics,
-    );
+    try {
+      document = await compatibilityMetadataQuery(
+        result,
+        addressBookHref,
+        query,
+        propertyNames,
+        diagnostics,
+      );
+    } catch (compatibilityError) {
+      if (!isQueryCompatibilityFailure(compatibilityError)) throw compatibilityError;
+      markCompatibility(diagnostics, "propfindGetFallbackAttempted");
+      const scanned = await scanContactsByGetFallback(
+        result,
+        addressBookHref,
+        config,
+        { query, limit },
+      );
+      markCompatibility(diagnostics, "propfindGetFallbackUsed");
+      if (diagnostics && typeof diagnostics === "object") {
+        diagnostics.fallbackScannedResources = scanned.scannedResources;
+        diagnostics.fallbackResourceTruncated = scanned.resourceTruncated;
+      }
+      return scanned;
+    }
   }
 
   const parsed = parseContacts(document, result, addressBookHref, config, query);
   invalid += parsed.invalid;
-  if (parsed.contacts.length >= config.maxCardDavContacts) {
-    return { contacts: parsed.contacts, invalid };
+  if (parsed.contacts.length >= limit) {
+    return { contacts: parsed.contacts.slice(0, limit), invalid, resourceTruncated: false };
   }
 
   const boundedCandidates = parsed.candidates.slice(0, config.maxCardDavResources);
-  for (let offset = 0; offset < boundedCandidates.length && parsed.contacts.length < config.maxCardDavContacts; offset += MULTIGET_BATCH_SIZE) {
+  for (let offset = 0; offset < boundedCandidates.length && parsed.contacts.length < limit; offset += MULTIGET_BATCH_SIZE) {
     const multiget = await addressBookMultiget(
       result.credentials,
       addressBookHref,
@@ -543,10 +663,10 @@ async function contactsForBook(result, addressBookHref, query, config, propertyN
     );
     if (!multiget) continue;
     const second = parseContacts(multiget, result, addressBookHref, config, query);
-    parsed.contacts.push(...second.contacts);
+    parsed.contacts.push(...second.contacts.slice(0, limit - parsed.contacts.length));
     invalid += second.invalid;
   }
-  return { contacts: parsed.contacts, invalid };
+  return { contacts: parsed.contacts.slice(0, limit), invalid, resourceTruncated: false };
 }
 
 export async function searchContacts(
@@ -560,6 +680,7 @@ export async function searchContacts(
   const contacts = [];
   let invalidVcards = 0;
   let matchedAddressBooks = 0;
+  let resourceTruncated = false;
   for (const result of results) {
     if (result.status !== "ok") continue;
     for (const book of exactAddressBook(result, addressBookHref, config)) {
@@ -571,9 +692,11 @@ export async function searchContacts(
         config,
         undefined,
         diagnostics,
+        resultLimit - contacts.length,
       );
       contacts.push(...found.contacts);
       invalidVcards += found.invalid;
+      resourceTruncated = resourceTruncated || found.resourceTruncated === true;
       if (contacts.length >= resultLimit) break;
     }
     if (contacts.length >= resultLimit) break;
@@ -581,7 +704,7 @@ export async function searchContacts(
   if (addressBookHref && matchedAddressBooks === 0) throw new AppError("CARDDAV_INVALID_PATH", "Use an address book href returned by CardDAV discovery.");
   return {
     contacts: contacts.slice(0, resultLimit),
-    truncated: contacts.length >= resultLimit,
+    truncated: resourceTruncated || contacts.length >= resultLimit,
     invalidVcards,
     sources: results.map((result) => ({
       source: result.source,
@@ -605,17 +728,34 @@ export async function getContact(config, { source, uid, href, addressBookHref } 
   for (const book of books) {
     const targetHrefs = normalizedHref ? [normalizedHref] : [];
     if (targetHrefs.length === 0 && uid) {
-      const document = await addressBookQuery(result.credentials, book.href, String(uid), ["UID"]);
-      const parsed = parseContacts(document, result, book.href, config, "");
-      const match = parsed.contacts.find((contact) => contact.uid === uid);
-      if (match) return match;
+      try {
+        const document = await addressBookQuery(result.credentials, book.href, String(uid), ["UID"]);
+        const parsed = parseContacts(document, result, book.href, config, "");
+        const match = parsed.contacts.find((contact) => contact.uid === uid);
+        if (match) return match;
+      } catch (error) {
+        if (!isQueryCompatibilityFailure(error)) throw error;
+        const scanned = await scanContactsByGetFallback(
+          result,
+          book.href,
+          config,
+          { uid: String(uid), limit: 1 },
+        );
+        if (scanned.contacts[0]) return scanned.contacts[0];
+      }
       continue;
     }
-    const document = await addressBookMultiget(result.credentials, book.href, targetHrefs);
-    if (!document) continue;
-    const parsed = parseContacts(document, result, book.href, config, "");
-    const match = parsed.contacts.find((contact) => !uid || contact.uid === uid || contact.href === normalizedHref);
-    if (match) return match;
+    try {
+      const document = await addressBookMultiget(result.credentials, book.href, targetHrefs);
+      if (!document) continue;
+      const parsed = parseContacts(document, result, book.href, config, "");
+      const match = parsed.contacts.find((contact) => !uid || contact.uid === uid || contact.href === normalizedHref);
+      if (match) return match;
+    } catch (error) {
+      if (!isQueryCompatibilityFailure(error) || !normalizedHref) throw error;
+      const loaded = await readContactResource(result, book.href, normalizedHref, config);
+      if (loaded.projected && (!uid || loaded.projected.uid === uid)) return loaded.projected;
+    }
   }
   throw new AppError("CARDDAV_CONTACT_NOT_FOUND", "The requested contact was not found.");
 }

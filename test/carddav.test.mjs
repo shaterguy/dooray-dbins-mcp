@@ -81,6 +81,15 @@ function contactResponse({ href = "/addressbooks/shared/person-1.vcf", includeDa
 </d:multistatus>`;
 }
 
+function contactListingResponse() {
+  return `<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:">
+  <d:response><d:href>/addressbooks/shared/person-1.vcf</d:href><d:propstat><d:prop>
+    <d:getetag>"v1"</d:getetag>
+  </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>
+</d:multistatus>`;
+}
+
 function installFetch({ organizationUnauthorized = false } = {}) {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -202,4 +211,77 @@ test("contact lookup validates discovered href and returns bounded projection", 
     () => toSameOriginUrl("https://carddav-members.dooray.co.kr/addressbooks/shared/person-1.vcf", CARDDAV_ORIGINS.personal),
     { code: "INVALID_DAV_PATH" },
   );
+});
+
+test("organization search falls back to bounded PROPFIND and GET when REPORT is unsupported", async () => {
+  const calls = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(String(url));
+    const body = String(options.body || "");
+    calls.push({ origin: parsed.origin, path: parsed.pathname, method: options.method, body });
+    if (options.method === "OPTIONS") return new Response("", { status: 200, headers: { DAV: "1, addressbook" } });
+    if (options.method === "PROPFIND") {
+      if (parsed.pathname === "/addressbooks/shared/" && body.includes("<d:getetag />") && !body.includes("resourcetype")) {
+        return new Response(contactListingResponse(), { status: 207 });
+      }
+      return new Response(discoveryResponse(parsed.pathname), { status: 207 });
+    }
+    if (options.method === "REPORT") return new Response("UNKNOWN_REQUEST", { status: 400 });
+    if (options.method === "GET" && parsed.pathname === "/addressbooks/shared/person-1.vcf") {
+      return new Response(vcard, { status: 200, headers: { "content-type": "text/vcard; charset=utf-8" } });
+    }
+    throw new Error(`unexpected request ${options.method} ${parsed.pathname}`);
+  };
+
+  const searched = await searchContacts(config, {
+    source: "organization",
+    query: "홍",
+    addressBookHref: "/addressbooks/shared/",
+    limit: 1,
+  });
+  assert.equal(searched.contacts.length, 1);
+  assert.equal(searched.contacts[0].formattedName, "홍길동");
+  assert.equal(searched.contacts[0].source, "organization");
+  assert.equal(searched.contacts[0].emails[0].value, "hong@example.com");
+  assert.equal(calls.some((call) => call.method === "REPORT"), true);
+  assert.equal(calls.some((call) => call.method === "PROPFIND" && call.body.includes("<d:getetag />")), true);
+  assert.equal(calls.some((call) => call.method === "GET"), true);
+  assert.equal(calls.every((call) => call.origin === CARDDAV_ORIGINS.organization), true);
+
+  const contact = await getContact(config, {
+    source: "organization",
+    href: "/addressbooks/shared/person-1.vcf",
+    addressBookHref: "/addressbooks/shared/",
+  });
+  assert.equal(contact.formattedName, "홍길동");
+  assert.equal("note" in contact, false);
+  assert.equal("photo" in contact, false);
+  globalThis.fetch = originalFetch;
+});
+
+test("large CardDAV responses require an explicit metadata opt-in", async () => {
+  const largeBody = "x".repeat(600 * 1024);
+  globalThis.fetch = async () => new Response(largeBody, { status: 200 });
+  await assert.rejects(
+    () => requestDav({
+      baseUrl: CARDDAV_ORIGINS.organization,
+      username: "shared-user",
+      password: "shared-password",
+      responseLimit: 5 * 1024 * 1024,
+      errorPrefix: "CARDDAV",
+      serviceName: "CardDAV",
+    }, "/", { method: "GET" }),
+    { code: "CARDDAV_RESPONSE_TOO_LARGE" },
+  );
+  const allowed = await requestDav({
+    baseUrl: CARDDAV_ORIGINS.organization,
+    username: "shared-user",
+    password: "shared-password",
+    responseLimit: 5 * 1024 * 1024,
+    errorPrefix: "CARDDAV",
+    serviceName: "CardDAV",
+    allowLargeCardDavResponse: true,
+  }, "/", { method: "GET" });
+  assert.equal(allowed.text.length, largeBody.length);
+  globalThis.fetch = originalFetch;
 });
