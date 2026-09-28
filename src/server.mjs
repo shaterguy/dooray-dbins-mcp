@@ -3,7 +3,6 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { checkCalDav, getEvents, listCalendars, searchEvents } from "./caldav.mjs";
 import { checkCardDav, getContact, getOrganizationCardDavIndexStatus, listAddressBooks, searchContacts } from "./carddav.mjs";
-import { checkLdap, getGroupMembers, getPerson, searchPeople } from "./ldap.mjs";
 import { toSafeError, toolFailure, toolSuccess } from "./errors.mjs";
 import { registerDoorayTools } from "./dooray/register-tools.mjs";
 
@@ -52,7 +51,6 @@ export function createMcpServer(config) {
       ready: true,
       fixedServices: {
         calendar: "caldav.dooray.co.kr",
-        directory: "ldap.dooray.co.kr:636",
         contacts: {
           personal: "carddav.dooray.co.kr",
           organization: "carddav-members.dooray.co.kr",
@@ -62,15 +60,13 @@ export function createMcpServer(config) {
       organizationContactIndex: getOrganizationCardDavIndexStatus(),
     };
     if (testConnections) {
-      const [calendar, directory, personalContacts, organizationContacts] = await Promise.allSettled([
+      const [calendar, personalContacts, organizationContacts] = await Promise.allSettled([
         checkCalDav(config),
-        checkLdap(config),
         checkCardDav(config, "personal"),
         checkCardDav(config, "organization"),
       ]);
       data.connections = {
         calendar: safeConnectionStatus(calendar),
-        directory: safeConnectionStatus(directory),
         contacts: {
           personal: safeConnectionStatus(personalContacts),
           organization: safeConnectionStatus(organizationContacts),
@@ -133,28 +129,8 @@ export function createMcpServer(config) {
     return toolSuccess({ contact: data }, "Found one CardDAV contact.");
   });
 
-  register(server, "directory_search_people", "Search the fixed Dooray LDAP directory using a bounded attribute allowlist.", {
-    query: z.string().trim().min(1).max(200),
-    limit: z.number().int().min(1).max(50).default(20),
-  }, async (args) => {
-    const people = await searchPeople(config, args);
-    return toolSuccess({ people }, `Found ${people.length} matching person record(s).`);
-  });
 
-  register(server, "directory_get_person", "Get one directory person by exact uid, email, or common name.", {
-    identifier: z.string().trim().min(1).max(320),
-  }, async (args) => {
-    const person = await getPerson(config, args);
-    return toolSuccess({ person }, "Found one directory person record.");
-  });
 
-  register(server, "directory_get_group_members", "List a bounded set of people in one exact directory group.", {
-    group: z.string().trim().min(1).max(320),
-    limit: z.number().int().min(1).max(20).default(20),
-  }, async (args) => {
-    const data = await getGroupMembers(config, args);
-    return toolSuccess(data, `Found ${data.members.length} group member(s).`);
-  });
 
   registerDoorayTools(server);
 

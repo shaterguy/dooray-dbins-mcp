@@ -25,8 +25,6 @@ const config = Object.freeze({
     doorayPassword: process.env.DOORAY_PASSWORD || "",
     caldavUsername: process.env.DOORAY_USERNAME || "",
     caldavPassword: process.env.DOORAY_PASSWORD || "",
-    ldapBindDn: process.env.DOORAY_USERNAME || "",
-    ldapPassword: process.env.DOORAY_PASSWORD || "",
     doorayApiToken: (process.env.DOORAY_API_TOKEN || "").trim(),
   }),
   dooray: Object.freeze({

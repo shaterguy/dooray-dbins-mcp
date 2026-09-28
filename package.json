@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": false,
   "type": "module",
-  "description": "Read-only Dooray REST, CalDAV, and LDAP MCP server for Vercel",
+  "description": "Read-only Dooray REST, CalDAV, and CardDAV MCP server for Vercel",
   "engines": {
     "node": "24.x"
   },
@@ -15,7 +15,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
     "fast-xml-parser": "5.10.1",
-    "ldapts": "9.0.0",
     "zod": "4.4.3"
   },
   "devDependencies": {
@@ -23,4 +22,3 @@
     "typescript": "5.8.3"
   }
 }
-

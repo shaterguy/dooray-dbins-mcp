@@ -24,16 +24,6 @@ import {
   toCalDavUrl,
 } from "../src/caldav.mjs";
 import { AppError, MAX_STRUCTURED_DATA_BYTES, toolSuccess } from "../src/errors.mjs";
-import {
-  classifyLdapError,
-  escapeLdapFilterValue,
-  isWithinBaseDn,
-  LDAP_UPSTREAM_MAX_CONCURRENT_SEARCHES,
-  mapWithConcurrency,
-  PERSON_ATTRIBUTES,
-  safeLdapAuthDiagnostic,
-  Semaphore,
-} from "../src/ldap.mjs";
 import { RequestGate } from "../src/request-gate.mjs";
 import { safeConnectionStatus } from "../src/server.mjs";
 import { expandCalendarEvents, parseCalendarEvents } from "../src/ical.mjs";
@@ -103,16 +93,9 @@ test("fixed service configuration cannot be overridden by environment", () => {
   const config = loadConfig({
     ...VALID_ENV,
     CALDAV_SERVER_URL: "https://attacker.invalid",
-    LDAP_URL: "ldap://attacker.invalid",
-    LDAP_BASE_DN: "dc=attacker",
   });
   assert.equal(config.caldavServerUrl, "https://caldav.dooray.co.kr");
-  assert.equal(config.ldapUrl, "ldaps://ldap.dooray.co.kr:636");
-  assert.equal(config.ldapBaseDn, "dc=dbins.dooray.co.kr");
   assert.equal(config.timezone, "Asia/Seoul");
-  assert.equal(config.ldapTlsRejectUnauthorized, true);
-  assert.equal(config.secrets.caldavUsername, config.secrets.ldapBindDn);
-  assert.equal(config.secrets.caldavPassword, config.secrets.ldapPassword);
   assert.equal(config.secrets.doorayApiToken, "abcdefghijklmnop");
   assert.deepEqual(SECRET_ENV_KEYS, ["MCP_PATH_TOKEN", "DOORAY_USERNAME", "DOORAY_PASSWORD", "DOORAY_API_TOKEN"]);
 });
@@ -122,11 +105,8 @@ test("upstream timeout budgets remain below the Vercel function limit", async ()
   const functionLimitMs = vercel.functions["api/mcp.mjs"].maxDuration * 1_000;
   const usableBudgetMs = functionLimitMs - FIXED_CONFIG.upstreamSafetyMarginMs;
   const calDavWorstCaseMs = 4 * FIXED_CONFIG.requestTimeoutMs;
-  const ldapGroupWorstCaseMs = FIXED_CONFIG.ldapConnectTimeoutMs
-    + (3 + Math.ceil(20 / FIXED_CONFIG.ldapGroupLookupConcurrency)) * FIXED_CONFIG.ldapTimeoutMs;
   assert.equal(FIXED_CONFIG.functionMaxDurationMs, functionLimitMs);
   assert.ok(calDavWorstCaseMs <= usableBudgetMs);
-  assert.ok(ldapGroupWorstCaseMs <= usableBudgetMs);
 });
 
 test("missing or malformed secret configuration fails readiness", () => {
@@ -204,7 +184,7 @@ test("Vercel rewrite shape passes the named path parameter to the internal MCP f
   }
 });
 
-test("CalDAV URL boundary, bounded streaming, XML entity defense, and LDAP escaping are strict", async () => {
+test("CalDAV URL boundary, bounded streaming, and XML entity defense are strict", async () => {
   const config = { ...FIXED_CONFIG };
   assert.equal(toCalDavUrl("/users/me/calendar/", config).origin, "https://caldav.dooray.co.kr");
   assert.throws(() => toCalDavUrl("https://attacker.invalid/calendar", config));
@@ -222,13 +202,6 @@ test("CalDAV URL boundary, bounded streaming, XML entity defense, and LDAP escap
   }));
   await assert.rejects(() => readResponseTextBounded(oversizedResponse, 5), { code: "CALDAV_RESPONSE_TOO_LARGE" });
   assert.equal(cancelled, true);
-  assert.equal(escapeLdapFilterValue("a*(b)\\\u0000"), "a\\2a\\28b\\29\\5c\\00");
-  assert.equal(isWithinBaseDn("uid=user,ou=people,DC=dbins.dooray.co.kr", FIXED_CONFIG.ldapBaseDn), true);
-  assert.equal(isWithinBaseDn("dc=dbins.dooray.co.kr", FIXED_CONFIG.ldapBaseDn), true);
-  assert.equal(isWithinBaseDn("uid=user,dc=dbins.dooray.co.kr.evil", FIXED_CONFIG.ldapBaseDn), false);
-  assert.equal(isWithinBaseDn("cn=escaped\\,dc=dbins.dooray.co.kr", FIXED_CONFIG.ldapBaseDn), false);
-  assert.equal(isWithinBaseDn("uid=user,dc=other", FIXED_CONFIG.ldapBaseDn), false);
-  assert.deepEqual(PERSON_ATTRIBUTES, ["cn", "displayName", "givenName", "sn", "uid", "mail", "title", "department", "telephoneNumber"]);
 });
 
 test("CalDAV discovery and health use the canonical /caldav/ entry point and refuse automatic redirects", async () => {
@@ -459,56 +432,9 @@ test("monthly all-day recurrences expand by month day and ordinal weekday", () =
   ]);
 });
 
-test("LDAP and service status expose only allowlisted safe connection errors", () => {
-  assert.equal(classifyLdapError({ name: "InvalidCredentialsError", message: "secret" }).code, "LDAP_AUTH_FAILED");
-  assert.equal(
-    classifyLdapError({ name: "InvalidCredentialsError", message: "LDAP error: data 532, diagnostic includes secret" }).safeMessage,
-    "The directory service rejected the configured credentials. Server diagnostic: the password has expired.",
-  );
-  assert.equal(safeLdapAuthDiagnostic({ message: "data 775" }), "the account is locked");
-  assert.equal(safeLdapAuthDiagnostic({ message: "data 999" }), "");
-  assert.equal(classifyLdapError({ name: "InvalidDNSyntaxError", resultCode: 34 }).code, "LDAP_BIND_DN_INVALID");
-  assert.equal(classifyLdapError({ code: "ETIMEDOUT", message: "host secret" }).code, "LDAP_TIMEOUT");
-  assert.equal(classifyLdapError({ code: "ERR_TLS_CERT_ALTNAME_INVALID", stack: "secret" }).code, "LDAP_TLS_FAILED");
-  assert.equal(classifyLdapError({ code: "ENOTFOUND", cause: { hostname: "secret" } }).code, "LDAP_UNAVAILABLE");
-  assert.equal(classifyLdapError({ message: "bind DN and password" }).code, "LDAP_REQUEST_FAILED");
 
-  const status = safeConnectionStatus({
-    status: "rejected",
-    reason: new AppError("LDAP_UNAVAILABLE", "The directory service is unavailable."),
-  });
-  assert.deepEqual(status, {
-    ok: false,
-    error: { code: "LDAP_UNAVAILABLE", message: "The directory service is unavailable." },
-  });
-  assert.equal(JSON.stringify(status).includes("secret"), false);
-});
 
-test("bounded LDAP concurrency preserves order and MCP output rejects oversized data", async () => {
-  let active = 0;
-  let peak = 0;
-  const mapped = await mapWithConcurrency([0, 1, 2, 3, 4], 2, async (value) => {
-    active += 1;
-    peak = Math.max(peak, active);
-    await new Promise((resolve) => setImmediate(resolve));
-    active -= 1;
-    return `person-${value}`;
-  });
-  assert.equal(peak, 2);
-  assert.deepEqual(mapped, ["person-0", "person-1", "person-2", "person-3", "person-4"]);
-
-  active = 0;
-  peak = 0;
-  const semaphore = new Semaphore(2);
-  await Promise.all([0, 1, 2, 3, 4].map(() => semaphore.withPermit(async () => {
-    active += 1;
-    peak = Math.max(peak, active);
-    await new Promise((resolve) => setImmediate(resolve));
-    active -= 1;
-  })));
-  assert.equal(peak, 2);
-  assert.equal(LDAP_UPSTREAM_MAX_CONCURRENT_SEARCHES, 8);
-
+test("MCP output rejects oversized structured data without echoing payload fields", () => {
   const response = toolSuccess({ people: [{ cn: "홍길동" }] }, "Found one person.");
   assert.equal(response.content[0].text, "Found one person.");
   assert.equal(response.content[0].text.includes("홍길동"), false);
@@ -609,7 +535,7 @@ test("MCP preflight allows authentication and MCP identification headers only fo
   }
 });
 
-test("stateless Streamable HTTP negotiates initialize, notification, and all twenty-one annotated tools", async () => {
+test("stateless Streamable HTTP negotiates initialize, notification, and all eighteen annotated tools", async () => {
   useEnv();
   const { server, baseUrl } = await startMcp();
   const endpoint = `${baseUrl}/${TOKEN}/mcp`;
@@ -644,9 +570,6 @@ test("stateless Streamable HTTP negotiates initialize, notification, and all twe
       "carddav_list_address_books",
       "carddav_search_contacts",
       "carddav_get_contact",
-      "directory_search_people",
-      "directory_get_person",
-      "directory_get_group_members",
       "dooray_check_connection",
       "dooray_whoami",
       "dooray_common",
@@ -664,8 +587,6 @@ test("stateless Streamable HTTP negotiates initialize, notification, and all twe
       assert.equal(tool.inputSchema.type, "object");
       if (tool.outputSchema) assert.equal(tool.outputSchema.type, "object");
     }
-    const groupTool = toolsBody.result.tools.find((tool) => tool.name === "directory_get_group_members");
-    assert.equal(groupTool.inputSchema.properties.limit.maximum, 20);
 
     const statusResponse = await post({
       jsonrpc: "2.0",

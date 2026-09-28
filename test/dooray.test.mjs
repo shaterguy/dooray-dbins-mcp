@@ -113,7 +113,7 @@ test("MCP access key compatibility uses the configured bearer or custom header o
   assert.equal(authorizeMcpAccessKey(request(), "access-secret").status, 401);
 });
 
-test("canonical credentials are shared by CalDAV and LDAP while the REST token stays separate", () => {
+test("canonical credentials are shared by CalDAV and CardDAV while the REST token stays separate", () => {
   const config = loadConfig({
     MCP_PATH_TOKEN: TOKEN,
     DOORAY_USERNAME: "same-user",
@@ -121,9 +121,9 @@ test("canonical credentials are shared by CalDAV and LDAP while the REST token s
     DOORAY_API_TOKEN: API_TOKEN,
   });
   assert.equal(config.secrets.caldavUsername, "same-user");
-  assert.equal(config.secrets.ldapBindDn, "same-user");
   assert.equal(config.secrets.caldavPassword, "same-password");
-  assert.equal(config.secrets.ldapPassword, "same-password");
+  assert.equal(config.secrets.doorayUsername, "same-user");
+  assert.equal(config.secrets.doorayPassword, "same-password");
   assert.equal(config.secrets.doorayApiToken, API_TOKEN);
 });
 
