@@ -9,7 +9,7 @@ import {
   textValue,
   toSameOriginUrl,
 } from "./dav.mjs";
-import { contactSearchText, parseVCard, projectContact } from "./vcard.mjs";
+import { VCARD_ALLOWED_PROPERTIES, contactSearchText, parseVCard, projectContact } from "./vcard.mjs";
 
 export const CARDDAV_PERSONAL_ORIGIN = "https://carddav.dooray.co.kr";
 export const CARDDAV_ORGANIZATION_ORIGIN = "https://carddav-members.dooray.co.kr";
@@ -25,6 +25,14 @@ const DISCOVERY_PATHS = Object.freeze([
 ]);
 const MULTIGET_BATCH_SIZE = 10;
 const GET_FALLBACK_CONCURRENCY = 4;
+const ORGANIZATION_INDEX_CONCURRENCY = 48;
+const ORGANIZATION_INDEX_TTL_MS = 5 * 60 * 1000;
+const ORGANIZATION_INDEX_MAX_RESOURCES = 20_000;
+const ORGANIZATION_VCARD_RESPONSE_LIMIT = 5 * 1024 * 1024;
+const VCARD_ALLOWED_PROPERTY_SET = new Set(VCARD_ALLOWED_PROPERTIES);
+const organizationIndexCache = new Map();
+let organizationWarmupPromise = null;
+let organizationWarmupError = null;
 const ADDRESS_DATA_PROPS = "<d:getetag /><c:address-data content-type=\"text/vcard\" version=\"4.0\"><c:prop name=\"UID\" /><c:prop name=\"FN\" /><c:prop name=\"N\" /><c:prop name=\"EMAIL\" /><c:prop name=\"TEL\" /><c:prop name=\"ORG\" /><c:prop name=\"TITLE\" /></c:address-data>";
 const METADATA_ONLY_PROPS = "<d:getetag />";
 const FIRST_CONTACT_DATA_PROPS = "<c:address-data content-type=\"text/vcard\" version=\"4.0\"><c:prop name=\"UID\" /><c:prop name=\"FN\" /></c:address-data>";
@@ -395,7 +403,43 @@ async function addressBookMultiget(credentials, addressBookHref, hrefs) {
   return parseCardDavXml(result.text);
 }
 
-async function contactResourceHrefs(result, addressBookHref, config) {
+function compactVCardForProjection(input) {
+  const output = [];
+  let inside = false;
+  let captureContinuation = false;
+  let ended = false;
+  for (const line of String(input).split(/\r\n|\n|\r/)) {
+    if (/^BEGIN:VCARD$/i.test(line)) {
+      output.push("BEGIN:VCARD");
+      inside = true;
+      captureContinuation = false;
+      continue;
+    }
+    if (/^END:VCARD$/i.test(line)) {
+      if (inside) output.push("END:VCARD");
+      ended = true;
+      break;
+    }
+    if (!inside) continue;
+    if (/^[ \t]/.test(line)) {
+      if (captureContinuation) output.push(line);
+      continue;
+    }
+    const left = line.split(":", 1)[0] || "";
+    const rawName = left.split(";", 1)[0] || "";
+    const name = (rawName.includes(".") ? rawName.slice(rawName.lastIndexOf(".") + 1) : rawName).toUpperCase();
+    captureContinuation = VCARD_ALLOWED_PROPERTY_SET.has(name);
+    if (captureContinuation) output.push(line);
+  }
+  if (!inside || !ended) throw new AppError("CARDDAV_INVALID_VCARD", "The DAV resource was not a complete vCard.");
+  return output.join("\r\n");
+}
+
+async function contactResourceInventory(
+  result,
+  addressBookHref,
+  maxResources = ORGANIZATION_INDEX_MAX_RESOURCES,
+) {
   const document = await propfind(
     result.credentials,
     addressBookHref,
@@ -410,17 +454,33 @@ async function contactResourceHrefs(result, addressBookHref, config) {
     "Use an address book href returned by CardDAV discovery.",
   );
   const bookPath = bookUrl.pathname.endsWith("/") ? bookUrl.pathname : `${bookUrl.pathname}/`;
-  const hrefs = [];
+  const resources = new Map();
   for (const response of multistatusResponses(document)) {
     const href = hrefFromResponse(response, result.credentials);
     if (!href || href === bookUrl.pathname || !href.startsWith(bookPath)) continue;
     if (!href.toLowerCase().endsWith(".vcf")) continue;
-    hrefs.push(href);
+    resources.set(href, {
+      href,
+      etag: textValue(responseProperties(response)?.getetag),
+    });
   }
-  const unique = [...new Set(hrefs)];
+  const entries = [...resources.values()];
   return {
-    hrefs: unique.slice(0, config.maxCardDavResources),
-    totalResources: unique.length,
+    entries: entries.slice(0, maxResources),
+    totalResources: entries.length,
+    truncated: entries.length > maxResources,
+  };
+}
+
+async function contactResourceHrefs(result, addressBookHref, config) {
+  const inventory = await contactResourceInventory(
+    result,
+    addressBookHref,
+    config.maxCardDavResources,
+  );
+  return {
+    hrefs: inventory.entries.map((entry) => entry.href),
+    totalResources: inventory.totalResources,
   };
 }
 
@@ -429,8 +489,12 @@ async function readContactResource(result, addressBookHref, href, config) {
     const response = await davRequest(result.credentials, href, {
       method: "GET",
       accept: "text/vcard, text/x-vcard;q=0.9",
+    }, {
+      responseLimit: ORGANIZATION_VCARD_RESPONSE_LIMIT,
+      allowLargeCardDavResponse: true,
     });
-    const contact = parseVCard(response.text, { maxBytes: config.maxCardDavVCardBytes });
+    const compact = compactVCardForProjection(response.text);
+    const contact = parseVCard(compact, { maxBytes: config.maxCardDavVCardBytes });
     return {
       contact,
       projected: projectContact(contact, { source: result.source, addressBookHref, href }),
@@ -446,6 +510,247 @@ async function readContactResource(result, addressBookHref, href, config) {
     }
     throw error;
   }
+}
+
+async function mapConcurrent(values, concurrency, mapper) {
+  const results = new Array(values.length);
+  let cursor = 0;
+  async function worker() {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= values.length) return;
+      results[index] = await mapper(values[index], index);
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), Math.max(1, values.length)) }, () => worker()),
+  );
+  return results;
+}
+
+function organizationIndexKey(result, addressBookHref) {
+  return `${result.credentials.baseUrl}|${addressBookHref}`;
+}
+
+async function buildOrganizationIndex(result, addressBookHref, config, previousData) {
+  const inventory = await contactResourceInventory(result, addressBookHref);
+  const previous = previousData?.byHref instanceof Map ? previousData.byHref : new Map();
+  const byHref = new Map();
+  const pending = [];
+  for (const entry of inventory.entries) {
+    const cached = previous.get(entry.href);
+    if (cached && entry.etag && cached.etag === entry.etag) {
+      byHref.set(entry.href, cached);
+    } else {
+      pending.push(entry);
+    }
+  }
+
+  let invalidVcards = 0;
+  let failedResources = 0;
+  const loaded = await mapConcurrent(
+    pending,
+    ORGANIZATION_INDEX_CONCURRENCY,
+    async (entry) => {
+      try {
+        const item = await readContactResource(result, addressBookHref, entry.href, config);
+        return { entry, item, error: null };
+      } catch (error) {
+        return { entry, item: null, error: toSafeError(error) };
+      }
+    },
+  );
+
+  const transientFailures = [];
+  for (const loadedEntry of loaded) {
+    if (loadedEntry.error) {
+      transientFailures.push(loadedEntry.entry);
+      continue;
+    }
+    invalidVcards += loadedEntry.item.invalid;
+    byHref.set(loadedEntry.entry.href, {
+      etag: loadedEntry.entry.etag,
+      contact: loadedEntry.item.projected,
+    });
+  }
+
+  if (transientFailures.length > 0) {
+    const retried = await mapConcurrent(
+      transientFailures,
+      Math.min(8, ORGANIZATION_INDEX_CONCURRENCY),
+      async (entry) => {
+        try {
+          const item = await readContactResource(result, addressBookHref, entry.href, config);
+          return { entry, item, error: null };
+        } catch (error) {
+          return { entry, item: null, error: toSafeError(error) };
+        }
+      },
+    );
+    for (const loadedEntry of retried) {
+      if (loadedEntry.error) {
+        failedResources += 1;
+        continue;
+      }
+      invalidVcards += loadedEntry.item.invalid;
+      byHref.set(loadedEntry.entry.href, {
+        etag: loadedEntry.entry.etag,
+        contact: loadedEntry.item.projected,
+      });
+    }
+  }
+
+  const contacts = [...byHref.values()].map((entry) => entry.contact).filter(Boolean);
+  const byUid = new Map(contacts.map((contact) => [contact.uid, contact]));
+  return {
+    byHref,
+    byUid,
+    contacts,
+    totalResources: inventory.totalResources,
+    indexedResources: byHref.size,
+    contactCount: contacts.length,
+    invalidVcards,
+    failedResources,
+    complete: !inventory.truncated && failedResources === 0 && byHref.size === inventory.entries.length,
+    builtAt: Date.now(),
+  };
+}
+
+function beginOrganizationIndexBuild(result, addressBookHref, config) {
+  const key = organizationIndexKey(result, addressBookHref);
+  const now = Date.now();
+  const current = organizationIndexCache.get(key);
+  if (current?.data && current.expiresAt > now) return Promise.resolve(current.data);
+  if (current?.promise) return current.promise;
+
+  const promise = buildOrganizationIndex(result, addressBookHref, config, current?.data)
+    .then((data) => {
+      organizationIndexCache.set(key, {
+        data,
+        expiresAt: Date.now() + ORGANIZATION_INDEX_TTL_MS,
+        promise: null,
+      });
+      return data;
+    })
+    .catch((error) => {
+      if (current?.data) {
+        organizationIndexCache.set(key, {
+          data: current.data,
+          expiresAt: Date.now() + 30_000,
+          promise: null,
+        });
+      } else {
+        organizationIndexCache.delete(key);
+      }
+      throw error;
+    });
+  organizationIndexCache.set(key, {
+    data: current?.data,
+    expiresAt: current?.expiresAt || 0,
+    promise,
+  });
+  return promise;
+}
+
+async function organizationContactIndex(result, addressBookHref, config) {
+  const key = organizationIndexKey(result, addressBookHref);
+  const now = Date.now();
+  const current = organizationIndexCache.get(key);
+  if (current?.data && current.expiresAt > now) {
+    return { ...current.data, cacheHit: true, refreshFailed: false, refreshing: false };
+  }
+  if (current?.promise) {
+    if (current.data) {
+      return { ...current.data, cacheHit: true, refreshFailed: false, refreshing: true };
+    }
+    throw new AppError("CARDDAV_INDEX_BUILDING", "The organization contact index is being prepared.");
+  }
+  if (current?.data) {
+    void beginOrganizationIndexBuild(result, addressBookHref, config).catch(() => {});
+    return { ...current.data, cacheHit: true, refreshFailed: false, refreshing: true };
+  }
+
+  const data = await beginOrganizationIndexBuild(result, addressBookHref, config);
+  return { ...data, cacheHit: false, refreshFailed: false, refreshing: false };
+}
+
+export function getOrganizationCardDavIndexStatus() {
+  const now = Date.now();
+  const states = [...organizationIndexCache.values()];
+  const data = states.map((state) => state.data).find(Boolean);
+  const building = Boolean(organizationWarmupPromise) || states.some((state) => Boolean(state.promise));
+  const error = organizationWarmupError;
+  const state = building
+    ? "building"
+    : data
+      ? (data.complete ? "ready" : "partial")
+      : error
+        ? "error"
+        : "idle";
+  return {
+    state,
+    totalResources: data?.totalResources || 0,
+    indexedResources: data?.indexedResources || 0,
+    contactCount: data?.contactCount || 0,
+    failedResources: data?.failedResources || 0,
+    complete: data?.complete === true,
+    ageMs: data?.builtAt ? Math.max(0, now - data.builtAt) : null,
+    ...(error ? { error } : {}),
+  };
+}
+
+export function startOrganizationCardDavIndexWarmup(config) {
+  if (organizationWarmupPromise) return getOrganizationCardDavIndexStatus();
+  organizationWarmupError = null;
+  organizationWarmupPromise = (async () => {
+    const results = await discoverSources(config, "organization");
+    const organization = results.find((result) => result.source === "organization" && result.status === "ok");
+    if (!organization) {
+      const failed = results.find((result) => result.source === "organization");
+      throw new AppError(
+        failed?.error?.code || "CARDDAV_DISCOVERY_FAILED",
+        failed?.error?.message || "The organization CardDAV address book could not be discovered.",
+      );
+    }
+    for (const book of organization.addressBooks) {
+      await beginOrganizationIndexBuild(organization, book.href, config);
+    }
+  })()
+    .catch((error) => {
+      organizationWarmupError = toSafeError(error);
+    })
+    .finally(() => {
+      organizationWarmupPromise = null;
+    });
+  return getOrganizationCardDavIndexStatus();
+}
+
+async function searchOrganizationIndex(result, addressBookHref, query, config, limit) {
+  const index = await organizationContactIndex(result, addressBookHref, config);
+  const normalizedQuery = String(query || "").toLocaleLowerCase("ko-KR");
+  const matched = [];
+  for (const contact of index.contacts) {
+    if (!normalizedQuery || contactSearchText(contact).includes(normalizedQuery)) {
+      matched.push(contact);
+    }
+  }
+  return {
+    contacts: matched.slice(0, limit),
+    invalid: index.invalidVcards,
+    resourceTruncated: !index.complete || matched.length > limit,
+    indexMeta: {
+      complete: index.complete,
+      totalResources: index.totalResources,
+      indexedResources: index.indexedResources,
+      contactCount: index.contactCount,
+      failedResources: index.failedResources,
+      cacheHit: index.cacheHit,
+      refreshFailed: index.refreshFailed,
+      refreshing: index.refreshing,
+      ageMs: Math.max(0, Date.now() - index.builtAt),
+    },
+  };
 }
 
 async function scanContactsByGetFallback(
@@ -633,16 +938,19 @@ async function contactsForBook(
     } catch (compatibilityError) {
       if (!isQueryCompatibilityFailure(compatibilityError)) throw compatibilityError;
       markCompatibility(diagnostics, "propfindGetFallbackAttempted");
-      const scanned = await scanContactsByGetFallback(
-        result,
-        addressBookHref,
-        config,
-        { query, limit },
-      );
+      const scanned = result.source === "organization"
+        ? await searchOrganizationIndex(result, addressBookHref, query, config, limit)
+        : await scanContactsByGetFallback(
+            result,
+            addressBookHref,
+            config,
+            { query, limit },
+          );
       markCompatibility(diagnostics, "propfindGetFallbackUsed");
       if (diagnostics && typeof diagnostics === "object") {
         diagnostics.fallbackScannedResources = scanned.scannedResources;
         diagnostics.fallbackResourceTruncated = scanned.resourceTruncated;
+        if (scanned.indexMeta) diagnostics.organizationIndex = scanned.indexMeta;
       }
       return scanned;
     }
@@ -681,6 +989,7 @@ export async function searchContacts(
   let invalidVcards = 0;
   let matchedAddressBooks = 0;
   let resourceTruncated = false;
+  let organizationIndex = null;
   for (const result of results) {
     if (result.status !== "ok") continue;
     for (const book of exactAddressBook(result, addressBookHref, config)) {
@@ -697,6 +1006,7 @@ export async function searchContacts(
       contacts.push(...found.contacts);
       invalidVcards += found.invalid;
       resourceTruncated = resourceTruncated || found.resourceTruncated === true;
+      if (found.indexMeta) organizationIndex = found.indexMeta;
       if (contacts.length >= resultLimit) break;
     }
     if (contacts.length >= resultLimit) break;
@@ -711,6 +1021,7 @@ export async function searchContacts(
       status: result.status,
       ...(result.error ? { error: result.error } : {}),
     })),
+    ...(organizationIndex ? { organizationIndex } : {}),
   };
 }
 
@@ -735,13 +1046,19 @@ export async function getContact(config, { source, uid, href, addressBookHref } 
         if (match) return match;
       } catch (error) {
         if (!isQueryCompatibilityFailure(error)) throw error;
-        const scanned = await scanContactsByGetFallback(
-          result,
-          book.href,
-          config,
-          { uid: String(uid), limit: 1 },
-        );
-        if (scanned.contacts[0]) return scanned.contacts[0];
+        if (result.source === "organization") {
+          const index = await organizationContactIndex(result, book.href, config);
+          const match = index.byUid.get(String(uid));
+          if (match) return match;
+        } else {
+          const scanned = await scanContactsByGetFallback(
+            result,
+            book.href,
+            config,
+            { uid: String(uid), limit: 1 },
+          );
+          if (scanned.contacts[0]) return scanned.contacts[0];
+        }
       }
       continue;
     }

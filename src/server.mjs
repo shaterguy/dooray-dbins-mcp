@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { checkCalDav, getEvents, listCalendars, searchEvents } from "./caldav.mjs";
-import { checkCardDav, getContact, listAddressBooks, searchContacts } from "./carddav.mjs";
+import { checkCardDav, getContact, getOrganizationCardDavIndexStatus, listAddressBooks, searchContacts } from "./carddav.mjs";
 import { checkLdap, getGroupMembers, getPerson, searchPeople } from "./ldap.mjs";
 import { toSafeError, toolFailure, toolSuccess } from "./errors.mjs";
 import { registerDoorayTools } from "./dooray/register-tools.mjs";
@@ -59,6 +59,7 @@ export function createMcpServer(config) {
         },
       },
       connectionsTested: testConnections,
+      organizationContactIndex: getOrganizationCardDavIndexStatus(),
     };
     if (testConnections) {
       const [calendar, directory, personalContacts, organizationContacts] = await Promise.allSettled([

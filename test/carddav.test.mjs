@@ -90,6 +90,29 @@ function contactListingResponse() {
 </d:multistatus>`;
 }
 
+function contactListingResponseMany(count, { book = "/addressbooks/shared/" } = {}) {
+  const responses = Array.from({ length: count }, (_, index) => `
+  <d:response><d:href>${book}person-${index + 1}.vcf</d:href><d:propstat><d:prop>
+    <d:getetag>"v${index + 1}"</d:getetag>
+  </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`).join("");
+  return `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:">${responses}</d:multistatus>`;
+}
+
+function personVcard(index, { target = false, largePhoto = false } = {}) {
+  return [
+    "BEGIN:VCARD",
+    "VERSION:3.0",
+    `UID:person-${index}`,
+    `FN:${target ? "홍길동" : `테스트${index}`}`,
+    `N:${target ? "홍;길동;;;" : `테스트${index};;;;`}`,
+    ...(largePhoto ? [`PHOTO;ENCODING=b:${"A".repeat(600 * 1024)}`] : []),
+    `EMAIL;TYPE=work:${target ? "hong@example.com" : `person${index}@example.com`}`,
+    "TEL;TYPE=cell:010-0000-0000",
+    "ORG:DB손해보험",
+    "END:VCARD",
+  ].join("\r\n");
+}
+
 function installFetch({ organizationUnauthorized = false } = {}) {
   const calls = [];
   globalThis.fetch = async (url, options = {}) => {
@@ -213,8 +236,9 @@ test("contact lookup validates discovered href and returns bounded projection", 
   );
 });
 
-test("organization search falls back to bounded PROPFIND and GET when REPORT is unsupported", async () => {
+test("organization search builds a full in-memory index beyond the first 100 resources and reuses it", async () => {
   const calls = [];
+  const resourceCount = 150;
   globalThis.fetch = async (url, options = {}) => {
     const parsed = new URL(String(url));
     const body = String(options.body || "");
@@ -222,13 +246,17 @@ test("organization search falls back to bounded PROPFIND and GET when REPORT is 
     if (options.method === "OPTIONS") return new Response("", { status: 200, headers: { DAV: "1, addressbook" } });
     if (options.method === "PROPFIND") {
       if (parsed.pathname === "/addressbooks/shared/" && body.includes("<d:getetag />") && !body.includes("resourcetype")) {
-        return new Response(contactListingResponse(), { status: 207 });
+        return new Response(contactListingResponseMany(resourceCount), { status: 207 });
       }
       return new Response(discoveryResponse(parsed.pathname), { status: 207 });
     }
     if (options.method === "REPORT") return new Response("UNKNOWN_REQUEST", { status: 400 });
-    if (options.method === "GET" && parsed.pathname === "/addressbooks/shared/person-1.vcf") {
-      return new Response(vcard, { status: 200, headers: { "content-type": "text/vcard; charset=utf-8" } });
+    if (options.method === "GET" && /^\/addressbooks\/shared\/person-\d+\.vcf$/.test(parsed.pathname)) {
+      const index = Number(parsed.pathname.match(/person-(\d+)\.vcf$/)[1]);
+      return new Response(personVcard(index, { target: index === resourceCount }), {
+        status: 200,
+        headers: { "content-type": "text/vcard; charset=utf-8" },
+      });
     }
     throw new Error(`unexpected request ${options.method} ${parsed.pathname}`);
   };
@@ -237,25 +265,94 @@ test("organization search falls back to bounded PROPFIND and GET when REPORT is 
     source: "organization",
     query: "홍",
     addressBookHref: "/addressbooks/shared/",
-    limit: 1,
+    limit: 5,
   });
   assert.equal(searched.contacts.length, 1);
   assert.equal(searched.contacts[0].formattedName, "홍길동");
   assert.equal(searched.contacts[0].source, "organization");
   assert.equal(searched.contacts[0].emails[0].value, "hong@example.com");
-  assert.equal(calls.some((call) => call.method === "REPORT"), true);
-  assert.equal(calls.some((call) => call.method === "PROPFIND" && call.body.includes("<d:getetag />")), true);
-  assert.equal(calls.some((call) => call.method === "GET"), true);
-  assert.equal(calls.every((call) => call.origin === CARDDAV_ORIGINS.organization), true);
+  assert.equal(searched.organizationIndex.complete, true);
+  assert.equal(searched.organizationIndex.totalResources, resourceCount);
+  assert.equal(searched.organizationIndex.indexedResources, resourceCount);
+  assert.equal(calls.filter((call) => call.method === "GET").length, resourceCount);
+
+  const getCount = calls.filter((call) => call.method === "GET").length;
+  const searchedAgain = await searchContacts(config, {
+    source: "organization",
+    query: "홍",
+    addressBookHref: "/addressbooks/shared/",
+    limit: 5,
+  });
+  assert.equal(searchedAgain.contacts[0].formattedName, "홍길동");
+  assert.equal(searchedAgain.organizationIndex.cacheHit, true);
+  assert.equal(calls.filter((call) => call.method === "GET").length, getCount);
 
   const contact = await getContact(config, {
     source: "organization",
-    href: "/addressbooks/shared/person-1.vcf",
+    href: `/addressbooks/shared/person-${resourceCount}.vcf`,
     addressBookHref: "/addressbooks/shared/",
   });
   assert.equal(contact.formattedName, "홍길동");
   assert.equal("note" in contact, false);
   assert.equal("photo" in contact, false);
+  globalThis.fetch = originalFetch;
+});
+
+test("organization index strips oversized disallowed vCard properties before parsing", async () => {
+  const book = "/addressbooks/large/";
+  globalThis.fetch = async (url, options = {}) => {
+    const parsed = new URL(String(url));
+    const body = String(options.body || "");
+    if (options.method === "OPTIONS") return new Response("", { status: 200, headers: { DAV: "1, addressbook" } });
+    if (options.method === "PROPFIND") {
+      if (parsed.pathname === book && body.includes("<d:getetag />") && !body.includes("resourcetype")) {
+        return new Response(contactListingResponseMany(1, { book }), { status: 207 });
+      }
+      if (parsed.pathname === "/.well-known/carddav") {
+        return new Response(`<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+  <d:response><d:href>/.well-known/carddav</d:href><d:propstat><d:prop>
+    <d:current-user-principal><d:href>/principals/shared/</d:href></d:current-user-principal>
+  </d:prop><d:status>HTTP/1.1 200 OK</d:propstat></d:response>
+</d:multistatus>`, { status: 207 });
+      }
+      if (parsed.pathname === "/principals/shared/") {
+        return new Response(`<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+  <d:response><d:href>/principals/shared/</d:href><d:propstat><d:prop>
+    <c:addressbook-home-set><d:href>/addressbooks/</d:href></c:addressbook-home-set>
+  </d:prop><d:status>HTTP/1.1 200 OK</d:propstat></d:response>
+</d:multistatus>`, { status: 207 });
+      }
+      if (parsed.pathname === "/addressbooks/") {
+        return new Response(`<?xml version="1.0"?>
+<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+  <d:response><d:href>${book}</d:href><d:propstat><d:prop>
+    <d:displayname>Large contacts</d:displayname>
+    <d:resourcetype><d:collection/><c:addressbook/></d:resourcetype>
+  </d:prop><d:status>HTTP/1.1 200 OK</d:propstat></d:response>
+</d:multistatus>`, { status: 207 });
+      }
+    }
+    if (options.method === "REPORT") return new Response("UNKNOWN_REQUEST", { status: 400 });
+    if (options.method === "GET" && parsed.pathname === `${book}person-1.vcf`) {
+      return new Response(personVcard(1, { target: true, largePhoto: true }), {
+        status: 200,
+        headers: { "content-type": "text/vcard; charset=utf-8" },
+      });
+    }
+    throw new Error(`unexpected request ${options.method} ${parsed.pathname}`);
+  };
+
+  const searched = await searchContacts(config, {
+    source: "organization",
+    query: "홍",
+    addressBookHref: book,
+    limit: 5,
+  });
+  assert.equal(searched.contacts.length, 1);
+  assert.equal(searched.contacts[0].formattedName, "홍길동");
+  assert.equal(searched.organizationIndex.complete, true);
   globalThis.fetch = originalFetch;
 });
 
