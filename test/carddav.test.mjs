@@ -236,7 +236,7 @@ test("contact lookup validates discovered href and returns bounded projection", 
   );
 });
 
-test("organization search builds a full in-memory index beyond the first 100 resources and reuses it", async () => {
+test("organization search scans beyond the first 100 resources without relying on an in-memory index", async () => {
   const calls = [];
   const resourceCount = 150;
   globalThis.fetch = async (url, options = {}) => {
@@ -284,8 +284,8 @@ test("organization search builds a full in-memory index beyond the first 100 res
     limit: 5,
   });
   assert.equal(searchedAgain.contacts[0].formattedName, "홍길동");
-  assert.equal(searchedAgain.organizationIndex.cacheHit, true);
-  assert.equal(calls.filter((call) => call.method === "GET").length, getCount);
+  assert.equal(searchedAgain.organizationIndex.cacheHit, false);
+  assert.equal(calls.filter((call) => call.method === "GET").length, getCount + resourceCount);
 
   const contact = await getContact(config, {
     source: "organization",
