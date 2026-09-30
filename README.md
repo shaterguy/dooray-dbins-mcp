@@ -10,7 +10,7 @@ Vercel에 배포하는 Dooray REST·CalDAV·CardDAV 조회 전용 MCP 서버입�
 
 CardDAV source는 `personal`(carddav.dooray.co.kr)과 `organization`(carddav-members.dooray.co.kr)으로 고정됩니다. 인증은 `DOORAY_USERNAME` / `DOORAY_PASSWORD`를 CalDAV와 CardDAV에서 공통 사용하며 CardDAV 전용 자격증명 환경변수는 없습니다.
 
-모든 도구에는 read-only annotation이 적용됩니다. Dooray REST는 GET만 사용하고, CalDAV·CardDAV는 조회용 OPTIONS·PROPFIND·REPORT·GET만 사용합니다. CardDAV 응답은 제한된 연락처 필드만 반환하고 전체 vCard, PHOTO, SOUND, KEY는 반환하지 않습니다. 조직 검색은 정렬된 href·ETag 목록을 확인하고 요청당 최대 256개 리소스를 동시 16개 GET으로 읽습니다. 발견·목록 조회·응답 본문을 포함한 전체 작업시간은 40초입니다. 검색은 전체 인덱스 구축을 기다리지 않습니다. 로컬 self-host 런타임은 시작 직후 인덱스 워밍업을 비동기로 시작하므로 MCP 요청의 기본 제한시간과 전체 인덱스 구축을 분리합니다. 최대 20,000개 리소스로 제한하고, 개별 vCard는 최대 5 MiB까지만 읽은 뒤 PHOTO·NOTE·SOUND·KEY 등 비허용 속성을 제거하고 기존 허용 필드만 파싱·반환합니다.
+모든 도구에는 read-only annotation이 적용됩니다. Dooray REST는 GET만 사용하고, CalDAV·CardDAV는 조회용 OPTIONS·PROPFIND·REPORT·GET만 사용합니다. CardDAV 응답은 제한된 연락처 필드만 반환하고 전체 vCard, PHOTO, SOUND, KEY는 반환하지 않습니다. 조직 검색은 정렬된 href·ETag 목록을 확인하고 요청당 최대 256개 리소스를 동시 16개 GET으로 읽습니다. 발견·목록 조회·응답 본문에 공유하는 협력적 I/O 예산은 40초입니다. 동기 XML 파싱·직렬화를 강제로 중단하지는 않으며 Vercel 60초 제한까지 20초 여유를 둡니다. 검색은 전체 인덱스 구축을 기다리지 않습니다. 로컬 self-host 런타임은 시작 직후 인덱스 워밍업을 비동기로 시작하므로 MCP 요청의 기본 제한시간과 전체 인덱스 구축을 분리합니다. 최대 20,000개 리소스로 제한하고, 개별 vCard는 최대 5 MiB까지만 읽은 뒤 PHOTO·NOTE·SOUND·KEY 등 비허용 속성을 제거하고 기존 허용 필드만 파싱·반환합니다.
 
 ## MCP 엔드포인트
 

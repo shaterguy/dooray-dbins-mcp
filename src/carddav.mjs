@@ -1067,7 +1067,7 @@ export async function searchContacts(
     [result] = await discoverSources(boundedConfig, "organization");
     books = exactAddressBook(result, addressBookHref, boundedConfig)
       .slice().sort((a, b) => a.href < b.href ? -1 : a.href > b.href ? 1 : 0);
-    capped = result.addressBooks.length >= config.maxCardDavAddressBooks;
+    capped = !addressBookHref && result.addressBooks.length >= config.maxCardDavAddressBooks;
     for (const book of books) {
       const inventory = await contactResourceInventory(result, book.href);
       totalResources += inventory.totalResources;
