@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import { createMcpServer } from "../src/server.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FIXED_CONFIG } from "../src/config.mjs";
@@ -184,4 +186,55 @@ test("address book cap stays explicitly incomplete at exhaustion", async () => {
   assert.equal(page.incomplete, true);
   assert.equal(page.nextCursor, null);
   assert.equal(page.reason, "resource_cap");
+});
+
+test("an exact selected address book is not incomplete because other books hit the discovery cap", async () => {
+  fixture({ count: 0, books: Array.from({ length: 20 }, (_, i) => "/books/selected" + i + "/"), failAt: -1 });
+  const page = await searchContacts(config, { source: "organization", query: "Target", addressBookHref: "/books/selected0/" });
+  assert.equal(page.incomplete, false);
+  assert.equal(page.nextCursor, null);
+  assert.equal(page.reason, null);
+});
+test("resource cap exhausts without an endless cursor", async () => {
+  fixture({ count: 20_001, books: ["/books/resource-cap/"], failAt: -1 });
+  const first = await searchContacts(config, { source: "organization", query: "Target" });
+  const cursor = JSON.parse(Buffer.from(first.nextCursor, "base64url").toString());
+  cursor.offset = 20_000;
+  const last = await searchContacts(config, { source: "organization", query: "Target", cursor: Buffer.from(JSON.stringify(cursor)).toString("base64url") });
+  assert.equal(last.nextCursor, null);
+  assert.equal(last.incomplete, true);
+  assert.equal(last.reason, "resource_cap");
+});
+test("MCP exposes cursor schema and accepts continuation through the real transport", async () => {
+  fixture({ count: 300, books: ["/books/mcp/"], failAt: -1 });
+  const http = createServer(async (req, res) => {
+    const built = createMcpServer(config);
+    try {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      await built.server.connect(built.transport);
+      res.once("close", () => { void built.transport.close().catch(() => {}); void built.server.close().catch(() => {}); });
+      await built.transport.handleRequest(req, res, JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    } catch { res.statusCode = 500; res.end(); }
+  });
+  await new Promise(resolve => http.listen(0, "127.0.0.1", resolve));
+  async function call(method, params) {
+    const response = await originalFetch("http://127.0.0.1:" + http.address().port + "/mcp", {
+      method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    });
+    assert.equal(response.status, 200);
+    return (await response.json()).result;
+  }
+  try {
+    const list = await call("tools/list", {});
+    assert.equal(list.tools.find(tool => tool.name === "carddav_search_contacts").inputSchema.properties.cursor.type, "string");
+    const first = await call("tools/call", { name: "carddav_search_contacts", arguments: { source: "organization", query: "Target" } });
+    assert.equal(first.structuredContent.ok, true);
+    assert.equal(first.structuredContent.data.incomplete, true);
+    assert.match(first.content[0].text, /Partial search/);
+    const last = await call("tools/call", { name: "carddav_search_contacts", arguments: { source: "organization", query: "Target", cursor: first.structuredContent.data.nextCursor } });
+    assert.equal(last.structuredContent.data.incomplete, false);
+    assert.equal(last.structuredContent.data.contacts.length, 1);
+  } finally { await new Promise(resolve => http.close(resolve)); }
 });
