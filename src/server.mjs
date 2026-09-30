@@ -109,14 +109,15 @@ export function createMcpServer(config) {
     return listAddressBooksResult(config, { source });
   });
 
-  register(server, "carddav_search_contacts", "Search bounded contact fields in the fixed personal or organization CardDAV source.", {
+  register(server, "carddav_search_contacts", "Search bounded contact fields. Organization results may be incomplete; repeat the same query and scope with nextCursor until it is null. Never interpret an incomplete empty page as no matches.", {
     source: z.enum(["personal", "organization", "all"]).default("all"),
     query: z.string().trim().min(1).max(200),
     addressBookHref: z.string().trim().min(1).max(2048).optional().describe("Address book href returned by carddav_list_address_books"),
     limit: z.number().int().min(1).max(50).default(20),
+    cursor: z.string().min(1).max(1024).optional().describe("nextCursor from the previous organization search page; keep query, source and addressBookHref unchanged"),
   }, async (args) => {
     const data = await searchContacts(config, args);
-    return toolSuccess(data, `Found ${data.contacts.length} matching CardDAV contact(s).`);
+    return toolSuccess(data, data.incomplete ? `Partial search: ${data.contacts.length} matching contact(s) in this page. ${data.nextCursor ? (data.reason === "resource_failed" || data.reason === "source_unavailable" ? "A resource could not be read. Do not repeatedly retry an unchanged failed position." : "Continue with nextCursor and the same query and scope.") : "Coverage is incomplete; do not claim no matches or an exhaustive result."}` : `Found ${data.contacts.length} matching CardDAV contact(s) in this page.`);
   });
 
   register(server, "carddav_get_contact", "Read one bounded contact from a fixed CardDAV source by a discovered href or UID.", {

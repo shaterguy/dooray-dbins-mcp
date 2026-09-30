@@ -1,3 +1,4 @@
+import { SEARCH_BUDGET_MS, decodeSearchCursor, encodeSearchCursor, scanResourcePage, searchDigest } from "./carddav-search.mjs";
 import { AppError, toSafeError } from "./errors.mjs";
 import {
   XML_BODY_LIMIT,
@@ -63,6 +64,7 @@ function sourceCredentials(config, source) {
     password,
     status: username && password ? "configured" : "unconfigured",
     requestTimeoutMs: config.requestTimeoutMs,
+    deadlineMs: config.cardDavDeadlineMs,
     responseLimit: Math.min(Number(config.maxCardDavVCardBytes) || 512 * 1024, 512 * 1024),
   };
 }
@@ -83,11 +85,13 @@ function propfindBody(properties) {
 }
 
 async function davRequest(credentials, href, options, requestOptions = {}) {
+  const remaining = credentials.deadlineMs === undefined ? Infinity : credentials.deadlineMs - Date.now();
+  if (remaining <= 0) throw new AppError("CARDDAV_SEARCH_BUDGET", "The contact search reached its time budget.");
   return requestDav({
     baseUrl: credentials.baseUrl,
     username: credentials.username,
     password: credentials.password,
-    requestTimeoutMs: credentials.requestTimeoutMs,
+    requestTimeoutMs: Math.min(credentials.requestTimeoutMs, remaining),
     responseLimit: requestOptions.responseLimit ?? credentials.responseLimit,
     errorPrefix: "CARDDAV",
     serviceName: "CardDAV",
@@ -464,7 +468,7 @@ async function contactResourceInventory(
       etag: textValue(responseProperties(response)?.getetag),
     });
   }
-  const entries = [...resources.values()];
+  const entries = [...resources.values()].sort((a, b) => a.href < b.href ? -1 : a.href > b.href ? 1 : 0);
   return {
     entries: entries.slice(0, maxResources),
     totalResources: entries.length,
@@ -499,6 +503,7 @@ async function readContactResource(result, addressBookHref, href, config) {
       contact,
       projected: projectContact(contact, { source: result.source, addressBookHref, href }),
       invalid: 0,
+      etag: response.response.headers.get("etag") || "",
     };
   } catch (error) {
     if (error instanceof AppError && [
@@ -506,7 +511,7 @@ async function readContactResource(result, addressBookHref, href, config) {
       "CARDDAV_NOT_FOUND",
       "CARDDAV_INVALID_VCARD",
     ].includes(error.code)) {
-      return { contact: null, projected: null, invalid: error.code === "CARDDAV_NOT_FOUND" ? 0 : 1 };
+      return { contact: null, projected: null, invalid: error.code === "CARDDAV_NOT_FOUND" ? 0 : 1, missing: error.code === "CARDDAV_NOT_FOUND" };
     }
     throw error;
   }
@@ -977,7 +982,7 @@ async function contactsForBook(
   return { contacts: parsed.contacts.slice(0, limit), invalid, resourceTruncated: false };
 }
 
-export async function searchContacts(
+async function searchContactsUnpaged(
   config,
   { source = "all", query, addressBookHref, limit = config.maxCardDavContacts, diagnostics } = {},
 ) {
@@ -1022,6 +1027,100 @@ export async function searchContacts(
       ...(result.error ? { error: result.error } : {}),
     })),
     ...(organizationIndex ? { organizationIndex } : {}),
+  };
+}
+
+// Organization searches never await the long-lived process's full-index warmup.
+export async function searchContacts(
+  config,
+  { source = "all", query, addressBookHref, limit = config.maxCardDavContacts, diagnostics, cursor } = {},
+) {
+  const normalizedQuery = String(query || "").trim();
+  if (!normalizedQuery || normalizedQuery.length > 200) throw new AppError("INVALID_CARDDAV_QUERY", "The contact search query is invalid.");
+  sourceList(source);
+  const resumed = decodeSearchCursor(cursor);
+  if (source === "personal") {
+    if (resumed) throw new AppError("CARDDAV_INVALID_CURSOR", "Personal searches do not accept organization continuation cursors.");
+    return searchContactsUnpaged(config, { source, query, addressBookHref, limit, diagnostics });
+  }
+  const scope = searchDigest([source, normalizedQuery, addressBookHref || ""]);
+  if (resumed && resumed.scope !== scope) throw new AppError("CARDDAV_INVALID_CURSOR", "Use the returned cursor with the same search query and scope.");
+  const deadline = Date.now() + SEARCH_BUDGET_MS;
+  const boundedConfig = { ...config, cardDavDeadlineMs: deadline };
+  const resultLimit = Math.min(Math.max(Math.floor(Number(limit) || 1), 1), config.maxCardDavContacts);
+  let personal = null;
+  let personalError = null;
+  // Personal results are emitted once; continuation is organization-only.
+  if (source === "all" && !resumed) {
+    try {
+      personal = await searchContactsUnpaged(boundedConfig, { source: "personal", query: normalizedQuery, addressBookHref, limit: resultLimit, diagnostics });
+    } catch (error) {
+      personalError = toSafeError(error);
+    }
+  }
+  let result;
+  let books;
+  const entries = [];
+  let totalResources = 0;
+  let capped = false;
+  try {
+    [result] = await discoverSources(boundedConfig, "organization");
+    books = exactAddressBook(result, addressBookHref, boundedConfig)
+      .slice().sort((a, b) => a.href < b.href ? -1 : a.href > b.href ? 1 : 0);
+    capped = result.addressBooks.length >= config.maxCardDavAddressBooks;
+    for (const book of books) {
+      const inventory = await contactResourceInventory(result, book.href);
+      totalResources += inventory.totalResources;
+      capped ||= inventory.truncated;
+      for (const entry of inventory.entries) {
+        if (entries.length < ORGANIZATION_INDEX_MAX_RESOURCES) entries.push({ ...entry, bookHref: book.href });
+        else capped = true;
+      }
+    }
+  } catch (error) {
+    if (source !== "all") throw error;
+    return {
+      contacts: personal?.contacts || [], truncated: true, incomplete: true,
+      nextCursor: cursor || null, reason: "source_unavailable",
+      invalidVcards: personal?.invalidVcards || 0,
+      sources: [
+        { source: "personal", status: resumed ? "previous_page" : personalError ? "error" : "ok", ...(personalError ? { error: personalError } : {}) },
+        { source: "organization", status: "error", error: toSafeError(error) },
+      ],
+    };
+  }
+  const hash = searchDigest([books.map(book => book.href), entries.map(entry => [entry.bookHref, entry.href, entry.etag]), totalResources, capped]);
+  if (resumed && resumed.hash !== hash) throw new AppError("CARDDAV_CURSOR_STALE", "The address book inventory changed. Restart without a cursor.");
+  if (resumed && resumed.offset > entries.length) throw new AppError("CARDDAV_INVALID_CURSOR", "The cursor position is outside this address book.");
+  // Existing personal searches cannot prove exhaustive coverage; never claim all-source completeness.
+  const priorUnresolved = source === "all" || resumed?.unresolved || false;
+  const priorContacts = personal?.contacts || [];
+  const page = await scanResourcePage({
+    entries, query: normalizedQuery, limit: resultLimit - priorContacts.length,
+    offset: resumed?.offset || 0, skipped: resumed?.skipped || 0, deadline,
+    read: entry => readContactResource(result, entry.bookHref, entry.href, boundedConfig),
+  });
+  const exhausted = page.offset === entries.length;
+  const incomplete = !exhausted || capped || page.skipped > 0 || priorUnresolved;
+  const nextCursor = exhausted ? null : encodeSearchCursor({
+    v: 1, scope, hash, offset: page.offset, skipped: page.skipped, unresolved: priorUnresolved,
+  });
+  return {
+    contacts: [...priorContacts, ...page.contacts],
+    truncated: incomplete, incomplete, nextCursor,
+    retryable: page.reason === "resource_failed" ? ["CARDDAV_TIMEOUT", "CARDDAV_UNAVAILABLE", "CARDDAV_RATE_LIMITED"].includes(page.failureCode) : nextCursor !== null,
+    reason: page.reason || (capped ? "resource_cap" : page.skipped ? "invalid_resources" : priorUnresolved ? "source_incomplete" : null),
+    invalidVcards: (personal?.invalidVcards || 0) + page.invalid,
+    sources: [
+      ...(source === "all" ? [{ source: "personal", status: resumed ? "previous_page" : personalError ? "error" : "ok", ...(personalError ? { error: personalError } : {}) }] : []),
+      { source: "organization", status: "ok" },
+    ],
+    progress: { scannedResources: page.scanned, nextOffset: page.offset, totalResources, requests: page.requests, skippedResources: page.skipped },
+    organizationIndex: {
+      complete: !incomplete, totalResources, indexedResources: page.offset,
+      contactCount: page.contacts.length, failedResources: page.reason === "resource_failed" ? 1 : 0,
+      cacheHit: false, refreshFailed: false, refreshing: false, ageMs: 0,
+    },
   };
 }
 

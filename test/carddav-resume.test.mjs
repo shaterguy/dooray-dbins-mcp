@@ -10,10 +10,11 @@ test.afterEach(() => { globalThis.fetch = originalFetch; Date.now = originalNow;
 function multi(responses) { return '<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">' + responses + '</d:multistatus>'; }
 function prop(href, value) { return '<d:response><d:href>' + href + '</d:href><d:propstat><d:prop>' + value + '</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>'; }
 function fixture({ count = 300, books = ["/books/resume/"], allMatch = false, failAt = 0 } = {}) {
-  const state = { gets: [], requests: [], revision: 1, failAt };
+  const state = { gets: [], requests: [], revision: 1, failAt, missingAt: -1, invalidAt: -1, getEtag: "", afterRequest: null };
   globalThis.fetch = async (url, options = {}) => {
     const path = new URL(String(url)).pathname;
     state.requests.push({ path, method: options.method });
+    state.afterRequest?.(path, options.method);
     if (options.method === "OPTIONS") return new Response("", { status: 200 });
     if (options.method === "REPORT") return new Response("unsupported", { status: 400 });
     if (options.method === "PROPFIND") {
@@ -26,7 +27,9 @@ function fixture({ count = 300, books = ["/books/resume/"], allMatch = false, fa
       const index = Number(path.match(/(\d+)\.vcf$/)?.[1]);
       state.gets.push(path);
       if (index === state.failAt) return new Response("", { status: 503 });
-      return new Response(["BEGIN:VCARD", "VERSION:3.0", "UID:" + path, "FN:" + (allMatch || index === count - 1 ? "Target" : "Other"), "NOTE:private-synthetic-note", "END:VCARD"].join("\r\n"), { status: 200 });
+      if (index === state.missingAt) return new Response("", { status: 404 });
+      if (index === state.invalidAt) return new Response("invalid-vcard", { status: 200 });
+      return new Response(["BEGIN:VCARD", "VERSION:3.0", "UID:" + path, "FN:" + (allMatch || index === count - 1 ? "Target" : "Other"), "NOTE:private-synthetic-note", "END:VCARD"].join("\r\n"), { status: 200, headers: state.getEtag ? { etag: state.getEtag } : {} });
     }
     throw new Error("Unexpected synthetic request");
   };
@@ -92,4 +95,93 @@ test("a failed resource leaves an explicit incomplete retry position", async () 
   const next = await searchContacts(config, { source: "organization", query: "Target", cursor: first.nextCursor });
   assert.equal(next.incomplete, false);
   assert.equal(next.contacts.length, 3);
+});
+
+test("multiple books are covered in stable order", async () => {
+  fixture({ count: 3, books: ["/books/z/", "/books/a/"], allMatch: true, failAt: -1 });
+  const seen = [];
+  let cursor;
+  do {
+    const page = await searchContacts(config, { source: "organization", query: "Target", limit: 2, cursor });
+    seen.push(...page.contacts.map(item => item.href));
+    cursor = page.nextCursor;
+  } while (cursor);
+  assert.deepEqual(seen, ["/books/a/00000.vcf", "/books/a/00001.vcf", "/books/a/00002.vcf", "/books/z/00000.vcf", "/books/z/00001.vcf", "/books/z/00002.vcf"]);
+});
+test("earlier invalid resources remain incomplete after exhaustion", async () => {
+  const state = fixture({ count: 300, books: ["/books/invalid/"], failAt: -1 });
+  state.invalidAt = 0;
+  const first = await searchContacts(config, { source: "organization", query: "Target" });
+  assert.equal(first.progress.skippedResources, 1);
+  const last = await searchContacts(config, { source: "organization", query: "Target", cursor: first.nextCursor });
+  assert.equal(last.nextCursor, null);
+  assert.equal(last.incomplete, true);
+  assert.equal(last.reason, "invalid_resources");
+});
+test("disappearing resources are not verified nonmatches", async () => {
+  const state = fixture({ count: 4, books: ["/books/disappear/"], failAt: -1 });
+  state.missingAt = 1;
+  const page = await searchContacts(config, { source: "organization", query: "Target" });
+  assert.equal(page.incomplete, true);
+  assert.equal(page.reason, "resource_failed");
+  assert.equal(page.progress.nextOffset, 1);
+});
+test("GET ETag drift rejects changed resources", async () => {
+  const state = fixture({ count: 4, books: ["/books/etag/"], failAt: -1 });
+  state.getEtag = "different";
+  await assert.rejects(() => searchContacts(config, { source: "organization", query: "Target" }), { code: "CARDDAV_CURSOR_STALE" });
+});
+test("time budget stops discovery before later network requests", async () => {
+  const state = fixture({ failAt: -1 });
+  let now = 1_000;
+  Date.now = () => now;
+  state.afterRequest = () => { now += 41_000; };
+  await assert.rejects(() => searchContacts(config, { source: "organization", query: "Target" }), { code: "CARDDAV_SEARCH_BUDGET" });
+  assert.equal(state.requests.length, 1);
+});
+test("time budget stops GET traversal at a resumable position", async () => {
+  const state = fixture({ count: 300, books: ["/books/time/"], failAt: -1 });
+  let now = 1_000;
+  Date.now = () => now;
+  state.afterRequest = (_path, method) => { if (method === "GET") now += 5_000; };
+  const page = await searchContacts(config, { source: "organization", query: "Target" });
+  assert.equal(page.incomplete, true);
+  assert.equal(page.reason, "time_budget");
+  assert.equal(typeof page.nextCursor, "string");
+  assert.ok(state.gets.length <= 8);
+});
+test("source all does not replay personal contacts on continuation", async () => {
+  fixture({ count: 300, books: ["/books/all/"], failAt: -1 });
+  const first = await searchContacts(config, { source: "all", query: "Target" });
+  assert.equal(typeof first.nextCursor, "string");
+  const next = await searchContacts(config, { source: "all", query: "Target", cursor: first.nextCursor });
+  assert.equal(next.contacts.length, 1);
+  assert.equal(next.contacts[0].source, "organization");
+  assert.equal(next.sources[0].status, "previous_page");
+  assert.equal(next.incomplete, true);
+});
+test("out-of-range and oversized cursors are rejected", async () => {
+  fixture({ count: 300, books: ["/books/range/"], failAt: -1 });
+  const first = await searchContacts(config, { source: "organization", query: "Target" });
+  const decoded = JSON.parse(Buffer.from(first.nextCursor, "base64url").toString());
+  decoded.offset = 301;
+  await assert.rejects(() => searchContacts(config, { source: "organization", query: "Target", cursor: Buffer.from(JSON.stringify(decoded)).toString("base64url") }), { code: "CARDDAV_INVALID_CURSOR" });
+  await assert.rejects(() => searchContacts(config, { source: "organization", query: "Target", cursor: "a".repeat(1025) }), { code: "CARDDAV_INVALID_CURSOR" });
+});
+test("source all preserves personal results if organization discovery fails", async () => {
+  fixture({ count: 2, books: ["/books/partial/"], allMatch: true, failAt: -1 });
+  const mocked = globalThis.fetch;
+  globalThis.fetch = (url, options) => new URL(String(url)).hostname === "carddav-members.dooray.co.kr" ? Promise.resolve(new Response("", { status: 401 })) : mocked(url, options);
+  const page = await searchContacts(config, { source: "all", query: "Target" });
+  assert.equal(page.contacts.length, 2);
+  assert.equal(page.incomplete, true);
+  assert.equal(page.nextCursor, null);
+  assert.equal(page.sources[1].status, "error");
+});
+test("address book cap stays explicitly incomplete at exhaustion", async () => {
+  fixture({ count: 0, books: Array.from({ length: 21 }, (_, i) => "/books/cap" + i + "/"), failAt: -1 });
+  const page = await searchContacts(config, { source: "organization", query: "Target" });
+  assert.equal(page.incomplete, true);
+  assert.equal(page.nextCursor, null);
+  assert.equal(page.reason, "resource_cap");
 });
