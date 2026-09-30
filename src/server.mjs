@@ -2,8 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { checkCalDav, getEvents, listCalendars, searchEvents } from "./caldav.mjs";
-import { checkCardDav, getContact, getOrganizationCardDavIndexStatus, listAddressBooks, searchContacts } from "./carddav.mjs";
+import { checkCardDav, getContact, getOrganizationCardDavIndexStatus, searchContacts } from "./carddav.mjs";
 import { toSafeError, toolFailure, toolSuccess } from "./errors.mjs";
+import { listAddressBooksResult } from "./carddav-diagnostics.mjs";
 import { registerDoorayTools } from "./dooray/register-tools.mjs";
 
 const annotations = Object.freeze({
@@ -105,8 +106,7 @@ export function createMcpServer(config) {
   register(server, "carddav_list_address_books", "List readable CardDAV address books from the fixed personal and organization sources.", {
     source: z.enum(["personal", "organization", "all"]).default("all"),
   }, async ({ source }) => {
-    const data = await listAddressBooks(config, { source });
-    return toolSuccess(data, "CardDAV address book discovery completed.");
+    return listAddressBooksResult(config, { source });
   });
 
   register(server, "carddav_search_contacts", "Search bounded contact fields in the fixed personal or organization CardDAV source.", {
