@@ -51,3 +51,7 @@ npm run check
 2. Framework Preset은 Other 또는 자동 감지를 사용하고 Build Command는 `npm run build`으로 둡니다.
 3. Production 환경변수를 등록합니다.
 4. 배포 후 `/<64-character-path-token>/mcp`에서 MCP initialize와 tools/list를 확인합니다.
+
+## 주소록 발견 진단
+
+`carddav_list_address_books`가 실패하거나 일부 source가 실패하면 `data.diagnostics`에 제한된 진단을 반환합니다. source와 고정 경로의 이름, HTTP 상태 또는 안전한 오류 코드, 알려진 인증 방식 이름만 포함합니다. 실제 URL, 계정, 비밀번호, 인증 헤더, 쿠키, 응답 본문과 연락처는 진단에 포함하지 않습니다. 성공 응답과 기존 접속 경로·인증 방식은 바뀌지 않습니다. 이 진단은 실패 위치를 구분하기 위한 것이며 인증 또는 개인 주소록 복구 성공을 의미하지 않습니다.

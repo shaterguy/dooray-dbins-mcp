@@ -97,3 +97,36 @@ test("unrecognized upstream authentication scheme is not copied into diagnostics
   assert.equal(JSON.stringify(result).includes(PRIVATE_MARKER.toLowerCase()), false);
   assert.equal(diagnostics[0].paths.some((entry) => "authScheme" in entry), false);
 });
+
+test("diagnostic projection rejects injected fields and caps source and route counts", async () => {
+  const { safeDiscoveryDiagnostics } = await import("../src/carddav-diagnostics.mjs");
+  const polluted = {
+    source: "personal", username: PRIVATE_MARKER, password: PRIVATE_MARKER,
+    paths: Array.from({ length: 10 }, () => ({
+      label: "root", options: 401, standard: PRIVATE_MARKER, direct: { body: PRIVATE_MARKER },
+      authScheme: PRIVATE_MARKER, url: PRIVATE_MARKER, headers: PRIVATE_MARKER,
+      cookie: PRIVATE_MARKER, body: PRIVATE_MARKER, contact: PRIVATE_MARKER,
+    })),
+  };
+  const safe = safeDiscoveryDiagnostics(Array(10).fill(polluted));
+  assert.equal(safe.length, 2);
+  assert.equal(safe[0].paths.length, 3);
+  assert.deepEqual(safe[0].paths[0], {
+    label: "root", options: 401, standard: "UPSTREAM_ERROR", direct: "UPSTREAM_ERROR",
+  });
+  assert.equal(JSON.stringify(safe).includes(PRIVATE_MARKER), false);
+  assert.deepEqual(safeDiscoveryDiagnostics([{ source: PRIVATE_MARKER, paths: [] }]), []);
+  assert.deepEqual(safeDiscoveryDiagnostics([{ source: "personal", paths: [{ label: PRIVATE_MARKER }] }]),
+    [{ source: "personal", paths: [] }]);
+  assert.deepEqual(safeDiscoveryDiagnostics(null), []);
+});
+
+test("successful address-book discovery preserves its existing response without diagnostics", async () => {
+  const { result } = await callList("personal", (_url, options) => {
+    if (options.method === "OPTIONS") return new Response("", { status: 200 });
+    return new Response('<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav"><d:response><d:href>/addressbooks/test/</d:href><d:propstat><d:prop><d:resourcetype><d:collection/><c:addressbook/></d:resourcetype><d:displayname>Synthetic book</d:displayname></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response></d:multistatus>', { status: 207 });
+  });
+  assert.equal(result.structuredContent.ok, true);
+  assert.equal(result.structuredContent.data.sources[0].addressBooks.length, 1);
+  assert.equal("diagnostics" in result.structuredContent.data, false);
+});
