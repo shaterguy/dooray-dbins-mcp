@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'ci-fallback/**']
     paths-ignore:
       - '.github/workflows/**'
   pull_request:
@@ -13,6 +13,8 @@ permissions:
 
 jobs:
   test:
+    if: >-
+      (github.event_name != 'push' || contains(github.event.head_commit.message, '[gh-fallback:ci.yml]'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
