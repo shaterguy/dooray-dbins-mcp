@@ -65,3 +65,7 @@ npm run check
 source: all의 개인 결과는 첫 페이지에만 포함됩니다. 기존 개인 검색은 전체 범위 검증을 제공하지 않으므로 all은 보수적으로 incomplete를 유지합니다. 조직 전체 검색 완료는 source: organization으로 확인하세요. 개인 전용 검색의 기존 동작은 유지됩니다.
 
 resource_failed/source_unavailable에서 진행 위치가 그대로라면 무한 재시도하지 마세요. 주소록 PROPFIND 목록 자체는 upstream 페이지를 지원하지 않아 시간·크기 한도를 넘으면 안전한 오류로 종료됩니다. 새 저장소·백그라운드 작업·환경변수는 사용하지 않습니다.
+
+### CalDAV 일별 시간대 보정
+
+Dooray 서버의 calendar-query는 TZID=Asia/Seoul 일정에서 한국시간을 UTC처럼 비교해 일부 일별 조회를 누락할 수 있습니다. calendar_get_events는 서버 필터를 앞뒤 24시간 확장하여 조회한 뒤 정확한 원래 요청 범위로 이벤트를 걸러냅니다. 요청한 start/end와 응답되는 일정 범위는 변경하지 않으며 테스트에서 인접일 일정을 제외하는지 검증합니다.

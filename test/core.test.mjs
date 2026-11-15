@@ -321,7 +321,7 @@ test("CalDAV falls back to an unbounded query and calendar-multiget when needed"
     assert.equal(parsed.events[0].uid, "event-fallback");
     assert.equal(calls[3].options.method, "REPORT");
     assert.match(calls[3].options.body, /calendar-data content-type="text\/calendar" version="2\.0"/);
-    assert.match(calls[3].options.body, /expand start="20260803T150000Z" end="20260804T150000Z"/);
+    assert.match(calls[3].options.body, /expand start="20260802T150000Z" end="20260805T150000Z"/);
     assert.equal(calls[4].options.method, "REPORT");
     assert.equal(calls[5].options.method, "PROPFIND");
     assert.equal(calls[6].options.method, "REPORT");
@@ -370,6 +370,49 @@ test("CalDAV reuses event hrefs returned without calendar-data", async () => {
     assert.equal(calls[3].options.method, "REPORT");
     assert.equal(calls[4].options.method, "REPORT");
     assert.match(calls[4].options.body, /event-href\.ics/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("CalDAV widens server time filters while enforcing exact requested dates", async () => {
+  const originalFetch = globalThis.fetch;
+  const href = "/caldav/calendars/test/";
+  const wrap = (x) => '<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">' + x + '</d:multistatus>';
+  const prop = (x) => '<d:response><d:propstat><d:prop>' + x + '</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>';
+  const principal = wrap(prop('<d:current-user-principal><d:href>/caldav/principals/test/</d:href></d:current-user-principal>'));
+  const home = wrap(prop('<c:calendar-home-set><d:href>' + href + '</d:href></c:calendar-home-set>'));
+  const list = wrap('<d:response><d:href>' + href + '</d:href><d:propstat><d:prop><d:resourcetype><c:calendar /></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>');
+  const resource = (uid, date) => {
+    const data = ["BEGIN:VCALENDAR", "BEGIN:VEVENT", "UID:" + uid, "SUMMARY:" + uid, "DTSTART;TZID=Asia/Seoul:" + date + "T180000", "DTEND;TZID=Asia/Seoul:" + date + "T200000", "END:VEVENT", "END:VCALENDAR"].join("&#13;&#10;");
+    return '<d:response><d:href>' + href + uid + '.ics</d:href><d:propstat><d:prop><c:calendar-data>' + data + '</c:calendar-data></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>';
+  };
+  const report = wrap(resource("previous", "20261115") + resource("target", "20261116") + resource("following", "20261117"));
+  const reports = [];
+  globalThis.fetch = async (_url, options) => {
+    const body = options.body || "";
+    let xml;
+    if (options.method === "PROPFIND") {
+      xml = body.includes("current-user-principal") ? principal : body.includes("calendar-home-set") ? home : list;
+    } else {
+      reports.push(body);
+      // Mimic the observed Dooray index: exact UTC bounds omit a Korean evening event.
+      xml = body.includes('<c:time-range start="20261114T150000Z" end="20261117T150000Z" />') ? report : wrap("");
+    }
+    return new Response(xml, { status: 207, headers: { "content-type": "application/xml" } });
+  };
+  try {
+    const value = await getEvents({ ...FIXED_CONFIG, secrets: { caldavUsername: "fixture", caldavPassword: "fixture" } }, {
+      calendarHref: href,
+      start: "2026-11-16T00:00:00+09:00",
+      end: "2026-11-17T00:00:00+09:00",
+      limit: 10,
+    });
+    assert.deepEqual(value.events.map((item) => item.uid), ["target"]);
+    assert.equal(value.start, "2026-11-15T15:00:00.000Z");
+    assert.equal(value.end, "2026-11-16T15:00:00.000Z");
+    assert.match(reports[0], /<c:expand start="20261114T150000Z" end="20261117T150000Z" \/>/);
   } finally {
     globalThis.fetch = originalFetch;
   }

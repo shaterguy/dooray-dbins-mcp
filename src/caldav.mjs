@@ -209,7 +209,20 @@ function validateRange(start, end, config) {
   if (rangeDays > config.maxCalendarRangeDays) {
     throw new AppError("DATE_RANGE_TOO_LARGE", `The calendar range may not exceed ${config.maxCalendarRangeDays} days.`);
   }
-  const caldavTime = (date) => date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+  return { startDate, endDate, startValue: caldavTime(startDate), endValue: caldavTime(endDate) };
+}
+
+const CALDAV_QUERY_PADDING_MS = 24 * 60 * 60 * 1000;
+
+function caldavTime(date) {
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+function paddedQueryRange(range) {
+  // Dooray may compare TZID=Asia/Seoul wall times as UTC in calendar-query.
+  // Broaden only the server filter; returned events retain the exact requested bounds.
+  const startDate = new Date(range.startDate.getTime() - CALDAV_QUERY_PADDING_MS);
+  const endDate = new Date(range.endDate.getTime() + CALDAV_QUERY_PADDING_MS);
   return { startDate, endDate, startValue: caldavTime(startDate), endValue: caldavTime(endDate) };
 }
 
@@ -370,7 +383,7 @@ export async function getEvents(config, { calendarHref, start, end, limit = 50 }
   }
   const range = validateRange(start, end, config);
   const safeLimit = Math.min(Math.max(limit, 1), config.maxCalendarResults);
-  const document = await calendarQuery(config, normalizedHref, range);
+  const document = await calendarQuery(config, normalizedHref, paddedQueryRange(range));
   let events = parsedEventsFromResponses(document, config, safeLimit, range);
   let candidateHrefs = responseResourceHrefs(document, config, safeLimit);
   const diagnostics = {
