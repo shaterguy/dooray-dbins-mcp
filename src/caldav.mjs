@@ -115,7 +115,7 @@ export function toCalDavUrl(href, config) {
   return url;
 }
 
-async function caldavRequest(config, href, { method, body, depth }) {
+async function caldavRequest(config, href, { method, body, depth, privatePolicyProbe = false, privateIO = false, create = false, match = null, freshRead = false }) {
   const url = toCalDavUrl(href, config);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.requestTimeoutMs);
@@ -130,15 +130,36 @@ async function caldavRequest(config, href, { method, body, depth }) {
       headers: {
         Authorization: `Basic ${authorization}`,
         Accept: "application/xml, text/calendar;q=0.9",
-        "Content-Type": "application/xml; charset=utf-8",
+        "Content-Type": privateIO && method === "PUT" ? "text/calendar; charset=utf-8" : "application/xml; charset=utf-8",
+        ...(privateIO && create ? {"If-None-Match":"*"} : {}),
+        ...(privateIO && match ? {"If-Match":match} : {}),
+        ...(privateIO && freshRead && method === "GET" ? {"Cache-Control":"no-cache","Pragma":"no-cache"} : {}),
         ...(depth !== undefined ? { Depth: String(depth) } : {}),
       },
       body,
       redirect: "error",
       signal: controller.signal,
     });
+    if (privateIO) {
+      const raw = method === "GET" && response.status === 200 || method === "REPORT" && response.status === 207;
+      if (!raw) await response.body?.cancel();
+      return {status:response.status, type:response.headers.get("content-type"), etag:response.headers.get("etag"),
+        body:raw ? await readResponseTextBounded(response,65536) : undefined};
+    }
     if (!response.ok && response.status !== 207) {
       throw new AppError("CALDAV_REQUEST_FAILED", "The calendar service rejected the request.");
+    }
+    if (privatePolicyProbe) {
+      if (method === "OPTIONS") {
+        await response.body?.cancel();
+        if (response.status !== 200 && response.status !== 204) throw new AppError("PRIVATE_OPTIONS_UNVERIFIED", "OPTIONS unverified.");
+        return (response.headers.get("dav") || "").split(",").some(v => v.trim().toLowerCase() === "calendar-default-alarms");
+      }
+      if (method !== "PROPFIND" || depth !== 0 || response.status !== 207) {
+        await response.body?.cancel();
+        throw new AppError("PRIVATE_PROPERTIES_UNVERIFIED", "PROPFIND unverified.");
+      }
+      return await readResponseTextBounded(response, 65536);
     }
     return await readResponseTextBounded(response);
   } catch (error) {
@@ -448,3 +469,45 @@ export async function checkCalDav(config) {
   return { ok: true };
 }
 
+
+/** Read-only operator readiness for the pinned personal-work collection. */
+export async function privateCollectionWriteReadiness(config) {
+  const {pin, READINESS_BODY, inspectCollectionPermissions}=await import('./private-calendar-readiness.mjs');
+  const exact=(await listCalendars(config)).filter(c=>c.displayName==='개인업무' && pin(c.href)==='e5683b72ba489ca82c510a17e371707f640408df7a136c7bb6c0d17c7fd08f6d');
+  if(exact.length!==1) return {kind:'target_changed',bind:false,unbind:false,writeContentOnCollection:false};
+  const xml=await caldavRequest(config,exact[0].href,{method:'PROPFIND',depth:0,body:READINESS_BODY});
+  return inspectCollectionPermissions(xml,exact[0].href,new URL(config.caldavServerUrl).origin);
+}
+
+import { getAlarmEvidence, safePath as privateSafePath } from "./private-calendar-alarm.mjs";
+// In-process bridge only. Never register as a public MCP tool or expose the underlying client.
+export async function getPrivateCalendarReadiness(config, args) {
+  return getAlarmEvidence({
+    home:()=>calendarHomeHref(config), list:()=>listCalendars(config),
+    canonicalize(href){
+      if(href.startsWith("/"))return privateSafePath(href);
+      if(!/^https:\/\/[^/?#]+\/[^?#]*$/.test(href))throw new Error("INVALID_PRIVATE_DAV_HREF");
+      const url=toCalDavUrl(href,config);
+      if(href!==url.origin+url.pathname)throw new Error("INVALID_PRIVATE_DAV_HREF");
+      return privateSafePath(url.pathname);
+    },
+    options:(href)=>caldavRequest(config,href,{method:"OPTIONS",privatePolicyProbe:true}),
+    propfind:(href,body)=>caldavRequest(config,href,{method:"PROPFIND",depth:0,body,privatePolicyProbe:true}),
+  },args);
+}
+
+import { openIO as openPrivateIOImpl } from "./private-calendar-live-io.mjs";
+// For the verified private local service route only; never a raw URL/body MCP tool.
+export async function openPrivateCalendarIO(config, args, freshRead=false) {
+  return openPrivateIOImpl({
+    home:()=>calendarHomeHref(config), list:()=>listCalendars(config),
+    canonicalize(href){
+      if(typeof href==="string" && href.startsWith("/")) return privateSafePath(href);
+      if(typeof href!=="string" || !/^https:\/\/[^/?#]+\/[^?#]*$/.test(href))throw new AppError("INVALID_PRIVATE_DAV_HREF","Invalid resource path.");
+      const u=toCalDavUrl(href,config);
+      if(href!==u.origin+u.pathname)throw new AppError("INVALID_PRIVATE_DAV_HREF","Invalid resource path.");
+      return privateSafePath(u.pathname);
+    },
+    send:(href,opts)=>caldavRequest(config,href,{...opts,freshRead})
+  },args);
+}

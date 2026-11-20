@@ -1,3 +1,10 @@
+import {resolve} from "node:path";
+import {createManaged,deleteManaged,readExactVersion} from "../src/private-calendar-managed.mjs";
+import {openPrivateCalendarIO} from '../src/caldav.mjs';
+import {fileURLToPath} from 'node:url';
+import {startPrivateOperator} from '../src/private-calendar-operator.mjs';
+import {getPrivateCalendarReadiness} from '../src/caldav.mjs';
+import { privateCollectionWriteReadiness } from '../src/caldav.mjs';
 import http from "node:http";
 import { createMcpServer } from "../src/server.mjs";
 import { FIXED_CONFIG } from "../src/config.mjs";
@@ -67,6 +74,12 @@ const server = http.createServer(async (req,res) => {
   try {
     const parsedBody=await bodyJson(req);
     const built=createMcpServer(config);
+    built.server.registerTool("calendar_private_write_readiness",{
+      description:"Read the configured principal's reported WebDAV collection privileges for the pinned personal-work calendar; do not modify records or security settings.",
+      inputSchema:{},annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true}
+    }, async()=>{try{const data=await privateCollectionWriteReadiness(config);return {content:[{type:"text",text:JSON.stringify(data)}]};}
+      catch{return {isError:true,content:[{type:"text",text:"Readiness check unavailable."}]};}});
+
     res.once("close",()=>{ void built.transport.close().catch(()=>{}); void built.server.close().catch(()=>{}); });
     await built.server.connect(built.transport);
     await built.transport.handleRequest(req,res,parsedBody);
@@ -81,3 +94,12 @@ server.listen(port,"127.0.0.1",()=>{
   console.log("dooray-dbins local MCP listening on 127.0.0.1:"+port);
   startOrganizationCardDavIndexWarmup(config);
 });
+
+// Owner-app local IPC only. Starting the transport makes no calendar request.
+const operatorRoot=fileURLToPath(new URL('../',import.meta.url));
+startPrivateOperator(operatorRoot,{
+ private_calendar_preflight: args=>getPrivateCalendarReadiness(config,args),
+ private_calendar_version: async q=>readExactVersion(await openPrivateCalendarIO(config,{calendarKey:q.calendarKey}),q),
+ private_calendar_create: q=>createManaged(resolve(operatorRoot),args=>openPrivateCalendarIO(config,args,true),q),
+ private_calendar_delete: q=>deleteManaged(resolve(operatorRoot),args=>openPrivateCalendarIO(config,args,true),q),
+}).catch(()=>console.error('Private calendar operator could not start.'));
