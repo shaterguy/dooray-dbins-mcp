@@ -1,0 +1,29 @@
+{
+  "interface": {
+    "capabilities": [],
+    "category": "Productivity",
+    "composerIcon": "./assets/icon.svg",
+    "defaultPrompt": "Dooray Dbins 브릿지로 오늘 업무 일정과 관련 업무를 확인해 주세요.",
+    "developerName": "JIN SU KIM",
+    "displayName": "Dooray Dbins Bridge",
+    "logo": "./assets/icon.svg",
+    "longDescription": "Termux dooray-dbins TMCP의 19개 공개 읽기 도구를 일반챗과 Work에서 사용합니다. 캘린더·연락처·프로젝트·업무·위키·드라이브·채널 조회 지침과 상세 호출 정의를 포함하며, 기존 DriveWorker 통합 스킬을 참조합니다. 서비스별 실제 권한과 인증 상태는 개별 조회 결과로 확인합니다.",
+    "shortDescription": "Termux 기반 Dooray 업무·일정 조회"
+  },
+  "name": "dooray-dbins-bridge",
+  "version": "1.0.10",
+  "description": "Dooray Dbins의 일정·연락처·프로젝트·업무·위키를 기존 Termux TMCP와 DriveWorker 통합 경로로 조회합니다.",
+  "author": {
+    "name": "JIN SU KIM"
+  },
+  "keywords": [
+    "dooray",
+    "dbins",
+    "두레이",
+    "일정",
+    "업무",
+    "연락처",
+    "tmcp"
+  ],
+  "skills": "./skills"
+}

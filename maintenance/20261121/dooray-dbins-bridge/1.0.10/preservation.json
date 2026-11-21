@@ -1,0 +1,27 @@
+{
+  "plugin_name": "dooray-dbins-bridge",
+  "version": "1.0.10",
+  "source_role": "Versioned source evidence from the saved private account plugin release",
+  "installable_package": false,
+  "scope": "19 public read-only TMCP tool definitions and usage guidance",
+  "preserved": [
+    "SKILL.md",
+    "tool-usage.md",
+    "all 19 tool definitions",
+    "portable and compatibility manifest identity/version/presentation"
+  ],
+  "sanitization": [
+    "Removed App binding declarations from manifest copies",
+    "Omitted author contact address from manifest copies",
+    "Replaced private result URL in snapshot source metadata with observation description"
+  ],
+  "retained_in_account_plugin": [
+    "App bindings",
+    "existing connected tools",
+    "assets",
+    "companion skill",
+    "agent metadata",
+    "default prompt"
+  ],
+  "runtime_source_commit": "3de637e0c9b44d44d91886124a68cf429afc989a"
+}
